@@ -35,18 +35,21 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get update && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver matching the Chrome version
-RUN apt-get update && apt-get install -y wget unzip \
-    && CHROME_VERSION=$(google-chrome --version | sed 's/Google Chrome //g' | sed 's/\..*//' | sed 's/ //g') \
-    && echo "Detected Chrome version: $CHROME_VERSION" \
-    && CHROMEDRIVER_VERSION=$(curl -sS chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION) \
+# Install ChromeDriver matching the Chrome version - using a more robust approach
+RUN apt-get update && apt-get install -y wget unzip curl \
+    && export PATH=$PATH:/usr/bin \
+    && which google-chrome-stable \
+    && CHROME_MAJOR_VERSION=$(google-chrome-stable --version | awk '{print $3}' | cut -d '.' -f 1) \
+    && echo "Detected Chrome major version: $CHROME_MAJOR_VERSION" \
+    && wget -q -O - https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_MAJOR_VERSION} > /tmp/chromedriver_version.txt \
+    && CHROMEDRIVER_VERSION=$(cat /tmp/chromedriver_version.txt) \
     && echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION" \
-    && wget -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip \
-    && unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
-    && rm /tmp/chromedriver.zip \
+    && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip \
+    && unzip -q /tmp/chromedriver.zip -d /usr/local/bin/ \
+    && rm /tmp/chromedriver.zip /tmp/chromedriver_version.txt \
     && chmod +x /usr/local/bin/chromedriver \
-    && echo "ChromeDriver installed at: $(which chromedriver)" \
-    && echo "ChromeDriver version: $(chromedriver --version)"
+    && ls -la /usr/local/bin/chromedriver \
+    && echo "ChromeDriver installation completed"
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
