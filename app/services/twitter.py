@@ -14,26 +14,49 @@ class TwitterScraper:
     def __init__(self):
         self.driver = None
     
-   def __enter__(self):
-    """Set up the browser when entering context."""
-    try:
-        self.driver = setup_browser()
-        return self
-    except Exception as e:
-        logger.error(f"Browser setup failed: {str(e)}")
-        # Include more detailed diagnostic information
-        import sys
-        import platform
-        logger.error(f"Python version: {sys.version}")
-        logger.error(f"Platform: {platform.platform()}")
-        # Check Chrome installation
-        import subprocess
+    def __enter__(self):
+        """Set up the browser when entering context."""
         try:
-            chrome_version = subprocess.check_output(["google-chrome", "--version"]).decode().strip()
-            logger.info(f"Chrome version: {chrome_version}")
-        except:
-            logger.error("Could not detect Chrome version")
-        raise
+            logger.info("Initializing browser for Twitter scraping")
+            self.driver = setup_browser()
+            logger.info("Browser setup successful")
+            return self
+        except Exception as e:
+            logger.error(f"Browser setup failed: {str(e)}")
+            # Include more detailed diagnostic information
+            import sys
+            import platform
+            import os
+            logger.error(f"Python version: {sys.version}")
+            logger.error(f"Platform: {platform.platform()}")
+            logger.error(f"Environment: Railway={os.environ.get('RAILWAY_ENVIRONMENT')}, Docker={os.environ.get('DOCKER_ENVIRONMENT')}")
+            
+            # Check Chrome installation
+            import subprocess
+            try:
+                chrome_version = subprocess.check_output(["google-chrome", "--version"]).decode().strip()
+                logger.info(f"Chrome version: {chrome_version}")
+            except Exception as chrome_err:
+                logger.error(f"Could not detect Chrome version: {str(chrome_err)}")
+                
+            # Check ChromeDriver installation
+            try:
+                if os.path.exists("/usr/local/bin/chromedriver"):
+                    chromedriver_version = subprocess.check_output(["/usr/local/bin/chromedriver", "--version"]).decode().strip()
+                    logger.info(f"ChromeDriver version: {chromedriver_version}")
+                    logger.info(f"ChromeDriver exists at expected path: /usr/local/bin/chromedriver")
+                else:
+                    logger.error("ChromeDriver not found at /usr/local/bin/chromedriver")
+                    # Try to find chromedriver elsewhere
+                    try:
+                        which_result = subprocess.check_output(["which", "chromedriver"]).decode().strip()
+                        logger.info(f"ChromeDriver found at: {which_result}")
+                    except:
+                        logger.error("ChromeDriver not found in PATH")
+            except Exception as driver_err:
+                logger.error(f"Error checking ChromeDriver: {str(driver_err)}")
+                
+            raise
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Clean up resources when exiting context."""

@@ -54,9 +54,12 @@ def setup_browser():
     # Check if running in Docker/Railway environment
     if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
         logger.info("Running in container environment")
-        # In Docker/Railway, use Chrome without Selenium Manager
+        # In Docker/Railway, use Chrome with explicit ChromeDriver path
         from selenium.webdriver.chrome.service import Service
-        service = Service()
+        # Specify the explicit path to chromedriver in the container
+        chromedriver_path = "/usr/local/bin/chromedriver"
+        logger.info(f"Using ChromeDriver at: {chromedriver_path}")
+        service = Service(executable_path=chromedriver_path)
         driver = webdriver.Chrome(service=service, options=chrome_options)
     else:
         # For local development, use ChromeDriverManager
