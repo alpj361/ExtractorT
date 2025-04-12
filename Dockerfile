@@ -35,18 +35,22 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get update && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install tools needed for webdriver-manager
+# Install tools needed for ChromeDriver
 RUN apt-get update && apt-get install -y wget unzip curl
 
-# Create cache directory for webdriver-manager
-RUN mkdir -p /root/.cache/selenium \
-    && chmod -R 777 /root/.cache
+# Install ChromeDriver 135.0.5349.0 for Chrome 135
+RUN mkdir -p /tmp/chromedriver_install \
+    && cd /tmp/chromedriver_install \
+    && wget -q https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/135.0.5349.0/linux64/chromedriver-linux64.zip \
+    && unzip chromedriver-linux64.zip \
+    && cp chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver_install \
+    && echo "ChromeDriver installation completed" \
+    && /usr/local/bin/chromedriver --version
 
-# Set environment variables for webdriver-manager
-ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
-ENV WDM_LOG_LEVEL=0
-ENV WDM_PROGRESS_BAR=0
-ENV WDM_LOCAL=0
+# Disable Selenium Manager
+ENV SE_DISABLE_MANAGER=true
 
 # Copy requirements and install dependencies
 COPY requirements.txt .

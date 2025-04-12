@@ -51,86 +51,82 @@ def setup_browser():
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     
-    # Use webdriver-manager in all environments
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        from webdriver_manager.core.os_manager import ChromeType
+    # Check if running in Docker/Railway environment
+    if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
+        logger.info("Running in container environment")
         
         # Add additional options for containerized environment
-        if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
-            logger.info("Running in container environment")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--remote-debugging-port=9222")
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-infobars")
-            chrome_options.add_argument("--disable-notifications")
-            
-            # Get Chrome version for logging
-            import subprocess
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-notifications")
+        
+        # Get Chrome version for logging
+        import subprocess
+        try:
+            chrome_version_output = subprocess.check_output(["google-chrome-stable", "--version"]).decode().strip()
+            logger.info(f"Installed Chrome: {chrome_version_output}")
+        except Exception as e:
+            logger.warning(f"Could not determine Chrome version: {str(e)}")
+        
+        # Use explicit ChromeDriver path
+        chromedriver_path = "/usr/local/bin/chromedriver"
+        
+        # Verify ChromeDriver exists and log version
+        if os.path.exists(chromedriver_path):
+            logger.info(f"ChromeDriver found at: {chromedriver_path}")
             try:
-                chrome_version_output = subprocess.check_output(["google-chrome-stable", "--version"]).decode().strip()
-                logger.info(f"Installed Chrome: {chrome_version_output}")
+                chromedriver_version = subprocess.check_output([chromedriver_path, "--version"]).decode().strip()
+                logger.info(f"ChromeDriver version: {chromedriver_version}")
             except Exception as e:
-                logger.warning(f"Could not determine Chrome version: {str(e)}")
+                logger.warning(f"Could not determine ChromeDriver version: {str(e)}")
+        else:
+            logger.error(f"ChromeDriver not found at: {chromedriver_path}")
+            raise FileNotFoundError(f"ChromeDriver not found at {chromedriver_path}")
         
-        # Use ChromeDriverManager to get the appropriate driver
-        logger.info("Using ChromeDriverManager to get appropriate ChromeDriver")
-        driver_path = ChromeDriverManager().install()
-        logger.info(f"ChromeDriver installed at: {driver_path}")
+        # Create service with explicit path
+        service = Service(executable_path=chromedriver_path)
         
-        # Create service with the driver path
-        service = Service(executable_path=driver_path)
-        
-        # Create driver
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        logger.info("Chrome driver created successfully")
-        
-        # Log Chrome and ChromeDriver versions for debugging
+        # Create driver with explicit service
         try:
-            chrome_version = driver.capabilities.get('browserVersion', 'unknown')
-            chromedriver_version = driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')
-            if isinstance(chromedriver_version, str) and ' ' in chromedriver_version:
-                chromedriver_version = chromedriver_version.split(' ')[0]
+            logger.info("Creating Chrome driver with explicit service path")
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("Chrome driver created successfully")
             
-            logger.info(f"Chrome version: {chrome_version}")
-            logger.info(f"ChromeDriver version: {chromedriver_version}")
-        except Exception as version_err:
-            logger.warning(f"Could not determine browser versions: {str(version_err)}")
-            
-    except Exception as e:
-        logger.error(f"Error setting up ChromeDriverManager: {str(e)}")
-        
-        # Fallback 1: Try with explicit path
-        try:
-            logger.info("Fallback 1: Trying with explicit ChromeDriver path")
-            chromedriver_path = "/usr/local/bin/chromedriver"
-            if os.path.exists(chromedriver_path):
-                logger.info(f"ChromeDriver found at: {chromedriver_path}")
-                service = Service(executable_path=chromedriver_path)
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                logger.info("Chrome driver created with explicit path")
-            else:
-                raise FileNotFoundError(f"ChromeDriver not found at {chromedriver_path}")
-        except Exception as fallback_err:
-            logger.error(f"Fallback 1 failed: {str(fallback_err)}")
-            
-            # Fallback 2: Try with minimal options
+            # Log Chrome and ChromeDriver versions from capabilities
             try:
-                logger.info("Fallback 2: Trying with minimal options")
-                minimal_options = Options()
-                minimal_options.add_argument("--headless")
-                minimal_options.add_argument("--no-sandbox")
-                minimal_options.add_argument("--disable-dev-shm-usage")
-                minimal_options.binary_location = "/usr/bin/google-chrome-stable"
-                driver = webdriver.Chrome(options=minimal_options)
-                logger.info("Chrome driver created with minimal options")
-            except Exception as minimal_err:
-                logger.error(f"Fallback 2 failed: {str(minimal_err)}")
+                chrome_version = driver.capabilities.get('browserVersion', 'unknown')
+                chromedriver_version = driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')
+                if isinstance(chromedriver_version, str) and ' ' in chromedriver_version:
+                    chromedriver_version = chromedriver_version.split(' ')[0]
                 
-                # Fallback 3: Last resort, try without any customization
-                logger.info("Fallback 3: Last resort attempt")
-                driver = webdriver.Chrome()
-                logger.info("Chrome driver created with default settings")
+                logger.info(f"Chrome version from capabilities: {chrome_version}")
+                logger.info(f"ChromeDriver version from capabilities: {chromedriver_version}")
+            except Exception as version_err:
+                logger.warning(f"Could not determine browser versions from capabilities: {str(version_err)}")
+        except Exception as e:
+            logger.error(f"Error creating Chrome driver: {str(e)}")
+            
+            # Try with minimal options as a last resort
+            logger.info("Trying with minimal options as fallback")
+            minimal_options = Options()
+            minimal_options.add_argument("--headless")
+            minimal_options.add_argument("--no-sandbox")
+            minimal_options.add_argument("--disable-dev-shm-usage")
+            minimal_options.binary_location = "/usr/bin/google-chrome-stable"
+            driver = webdriver.Chrome(service=service, options=minimal_options)
+            logger.info("Chrome driver created with minimal options")
+    else:
+        # For local development, use ChromeDriverManager
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            logger.info("Using ChromeDriverManager for local development")
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        except Exception as e:
+            logger.error(f"Error setting up ChromeDriverManager: {e}")
+            # Fallback to direct Chrome driver
+            driver = webdriver.Chrome(options=chrome_options)
     
     # Set page load timeout
     driver.set_page_load_timeout(30)
