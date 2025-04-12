@@ -82,9 +82,34 @@ def setup_browser():
         chrome_options.add_argument("--remote-debugging-port=9222")
         
         # Create driver with explicit service
-        logger.info("Creating Chrome driver with explicit service path")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        logger.info("Chrome driver created successfully")
+        try:
+            logger.info("Creating Chrome driver with explicit service path")
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("Chrome driver created successfully")
+            
+            # Log Chrome and ChromeDriver versions for debugging
+            chrome_version = driver.capabilities['browserVersion']
+            chromedriver_version = driver.capabilities['chrome']['chromedriverVersion'].split(' ')[0]
+            logger.info(f"Chrome version: {chrome_version}")
+            logger.info(f"ChromeDriver version: {chromedriver_version}")
+            
+            # Check version compatibility
+            chrome_major = chrome_version.split('.')[0]
+            chromedriver_major = chromedriver_version.split('.')[0]
+            if chrome_major != chromedriver_major:
+                logger.warning(f"Chrome version ({chrome_major}) and ChromeDriver version ({chromedriver_major}) major versions don't match")
+                logger.warning("This might cause stability issues, but we'll continue anyway")
+        except Exception as e:
+            logger.error(f"Error creating Chrome driver: {str(e)}")
+            # Try with default options as a last resort
+            logger.info("Trying with minimal options as fallback")
+            minimal_options = Options()
+            minimal_options.add_argument("--headless")
+            minimal_options.add_argument("--no-sandbox")
+            minimal_options.add_argument("--disable-dev-shm-usage")
+            minimal_options.binary_location = "/usr/bin/google-chrome-stable"
+            driver = webdriver.Chrome(service=service, options=minimal_options)
+            logger.info("Chrome driver created with minimal options")
     else:
         # For local development, use ChromeDriverManager
         try:
