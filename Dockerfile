@@ -35,20 +35,20 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get update && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver matching the Chrome version - using a more robust approach
-RUN apt-get update && apt-get install -y wget unzip curl \
-    && export PATH=$PATH:/usr/bin \
-    && which google-chrome-stable \
-    && CHROME_MAJOR_VERSION=$(google-chrome-stable --version | awk '{print $3}' | cut -d '.' -f 1) \
-    && echo "Detected Chrome major version: $CHROME_MAJOR_VERSION" \
-    && wget -q -O - https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_MAJOR_VERSION} > /tmp/chromedriver_version.txt \
-    && CHROMEDRIVER_VERSION=$(cat /tmp/chromedriver_version.txt) \
+# Install ChromeDriver - using a simplified approach with a fixed version
+# ChromeDriver 114.0.5735.90 is compatible with Chrome 114
+RUN apt-get update && apt-get install -y wget unzip curl
+
+# Download and install a specific version of ChromeDriver known to work with Chrome stable
+RUN CHROMEDRIVER_VERSION="114.0.5735.90" \
     && echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION" \
     && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip \
     && unzip -q /tmp/chromedriver.zip -d /usr/local/bin/ \
-    && rm /tmp/chromedriver.zip /tmp/chromedriver_version.txt \
-    && chmod +x /usr/local/bin/chromedriver \
-    && ls -la /usr/local/bin/chromedriver \
+    && rm /tmp/chromedriver.zip \
+    && chmod +x /usr/local/bin/chromedriver
+
+# Verify installation
+RUN ls -la /usr/local/bin/chromedriver \
     && echo "ChromeDriver installation completed"
 
 # Copy requirements and install dependencies

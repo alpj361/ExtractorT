@@ -56,11 +56,35 @@ def setup_browser():
         logger.info("Running in container environment")
         # In Docker/Railway, use Chrome with explicit ChromeDriver path
         from selenium.webdriver.chrome.service import Service
+        
         # Specify the explicit path to chromedriver in the container
         chromedriver_path = "/usr/local/bin/chromedriver"
-        logger.info(f"Using ChromeDriver at: {chromedriver_path}")
+        
+        # Verify ChromeDriver exists
+        if os.path.exists(chromedriver_path):
+            logger.info(f"ChromeDriver found at: {chromedriver_path}")
+        else:
+            logger.error(f"ChromeDriver not found at: {chromedriver_path}")
+            # Try to find chromedriver elsewhere
+            import subprocess
+            try:
+                which_result = subprocess.check_output(["which", "chromedriver"]).decode().strip()
+                logger.info(f"ChromeDriver found at alternative location: {which_result}")
+                chromedriver_path = which_result
+            except:
+                logger.warning("ChromeDriver not found in PATH, using default path")
+        
+        # Create service with explicit path and disable Selenium Manager
         service = Service(executable_path=chromedriver_path)
+        
+        # Add additional options to help with containerized environment
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        
+        # Create driver with explicit service
+        logger.info("Creating Chrome driver with explicit service path")
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        logger.info("Chrome driver created successfully")
     else:
         # For local development, use ChromeDriverManager
         try:
