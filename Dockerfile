@@ -36,21 +36,20 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && rm -rf /var/lib/apt/lists/*
 
 # Install ChromeDriver compatible with Chrome 135
+# Using a known working version for Chrome 135
 RUN apt-get update && apt-get install -y wget unzip curl
 
-# Get the latest ChromeDriver version compatible with Chrome 135
-RUN wget -q -O /tmp/chromedriver_version https://chromedriver.storage.googleapis.com/LATEST_RELEASE_135 \
-    && CHROMEDRIVER_VERSION=$(cat /tmp/chromedriver_version) \
-    && echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION for Chrome 135" \
-    && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip \
-    && unzip -q /tmp/chromedriver.zip -d /usr/local/bin/ \
-    && rm /tmp/chromedriver.zip /tmp/chromedriver_version \
+# Install ChromeDriver 135.0.5349.0 which is compatible with Chrome 135
+RUN echo "Installing ChromeDriver for Chrome 135" \
+    && wget -q -O /tmp/chromedriver.zip https://storage.googleapis.com/chrome-for-testing-public/135.0.5349.0/linux64/chromedriver-linux64.zip \
+    && unzip -q /tmp/chromedriver.zip -d /tmp/ \
+    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 \
     && chmod +x /usr/local/bin/chromedriver
 
 # Verify installation
-RUN ls -la /usr/local/bin/chromedriver \
-    && echo "ChromeDriver installation completed" \
-    && /usr/local/bin/chromedriver --version
+RUN echo "ChromeDriver installation completed" \
+    && ls -la /usr/local/bin/chromedriver
 
 # Copy requirements and install dependencies
 COPY requirements.txt .

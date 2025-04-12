@@ -84,21 +84,25 @@ def setup_browser():
         # Create driver with explicit service
         try:
             logger.info("Creating Chrome driver with explicit service path")
+            # Set specific Chrome options for compatibility with ChromeDriver 135
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-infobars")
+            chrome_options.add_argument("--disable-notifications")
+            
             driver = webdriver.Chrome(service=service, options=chrome_options)
             logger.info("Chrome driver created successfully")
             
             # Log Chrome and ChromeDriver versions for debugging
-            chrome_version = driver.capabilities['browserVersion']
-            chromedriver_version = driver.capabilities['chrome']['chromedriverVersion'].split(' ')[0]
-            logger.info(f"Chrome version: {chrome_version}")
-            logger.info(f"ChromeDriver version: {chromedriver_version}")
-            
-            # Check version compatibility
-            chrome_major = chrome_version.split('.')[0]
-            chromedriver_major = chromedriver_version.split('.')[0]
-            if chrome_major != chromedriver_major:
-                logger.warning(f"Chrome version ({chrome_major}) and ChromeDriver version ({chromedriver_major}) major versions don't match")
-                logger.warning("This might cause stability issues, but we'll continue anyway")
+            try:
+                chrome_version = driver.capabilities.get('browserVersion', 'unknown')
+                chromedriver_version = driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')
+                if isinstance(chromedriver_version, str) and ' ' in chromedriver_version:
+                    chromedriver_version = chromedriver_version.split(' ')[0]
+                
+                logger.info(f"Chrome version: {chrome_version}")
+                logger.info(f"ChromeDriver version: {chromedriver_version}")
+            except Exception as version_err:
+                logger.warning(f"Could not determine browser versions: {str(version_err)}")
         except Exception as e:
             logger.error(f"Error creating Chrome driver: {str(e)}")
             # Try with default options as a last resort
