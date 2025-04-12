@@ -37,6 +37,9 @@ def setup_browser():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
+    # Explicitly set Chrome binary path in container
+    chrome_options.binary_location = "/usr/bin/google-chrome-stable"
+    
     # Rotate user agents to avoid detection
     user_agent = random.choice(USER_AGENTS)
     chrome_options.add_argument(f"--user-agent={user_agent}")
@@ -51,8 +54,10 @@ def setup_browser():
     # Check if running in Docker/Railway environment
     if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
         logger.info("Running in container environment")
-        # In Docker/Railway, Chrome is installed in the container
-        driver = webdriver.Chrome(options=chrome_options)
+        # In Docker/Railway, use Chrome without Selenium Manager
+        from selenium.webdriver.chrome.service import Service
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
     else:
         # For local development, use ChromeDriverManager
         try:

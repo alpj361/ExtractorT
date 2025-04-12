@@ -14,10 +14,26 @@ class TwitterScraper:
     def __init__(self):
         self.driver = None
     
-    def __enter__(self):
-        """Set up the browser when entering context."""
+   def __enter__(self):
+    """Set up the browser when entering context."""
+    try:
         self.driver = setup_browser()
         return self
+    except Exception as e:
+        logger.error(f"Browser setup failed: {str(e)}")
+        # Include more detailed diagnostic information
+        import sys
+        import platform
+        logger.error(f"Python version: {sys.version}")
+        logger.error(f"Platform: {platform.platform()}")
+        # Check Chrome installation
+        import subprocess
+        try:
+            chrome_version = subprocess.check_output(["google-chrome", "--version"]).decode().strip()
+            logger.info(f"Chrome version: {chrome_version}")
+        except:
+            logger.error("Could not detect Chrome version")
+        raise
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Clean up resources when exiting context."""

@@ -35,6 +35,14 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get update && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
+    # After installing Chrome, add these lines:
+RUN apt-get update && apt-get install -y wget unzip \
+&& CHROME_VERSION=$(google-chrome --version | sed 's/Google Chrome //g' | sed 's/\..*//' | sed 's/ //g') \
+&& wget -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/$(curl -sS chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION)/chromedriver_linux64.zip \
+&& unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
+&& rm /tmp/chromedriver.zip \
+&& chmod +x /usr/local/bin/chromedriver
+
 # Copy requirements and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
