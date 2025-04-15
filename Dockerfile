@@ -1,12 +1,16 @@
 FROM python:3.9-slim
 
+# Create a directory for the cookies file
+RUN mkdir -p /app/cookies
+
 # Set working directory
 WORKDIR /app
 
-# Install Chrome and dependencies
+# Install Chromium and dependencies
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
+    chromium \
+    chromium-driver \
+    curl \
     unzip \
     fonts-liberation \
     libasound2 \
@@ -30,19 +34,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-# Install Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
-    && apt-get update && apt-get install -y google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/*
+# Set up Chromium options
+ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROME_PATH=/usr/lib/chromium/
+ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+ENV CHROME_OPTS="--no-sandbox --disable-dev-shm-usage --disable-gpu --remote-debugging-port=9222"
 
-
-# Descargar e instalar ChromeDriver (Chrome for Testing)
-RUN wget -O /tmp/chromedriver.zip "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/124.0.6367.0/linux64/chromedriver-linux64.zip" && \
-    unzip /tmp/chromedriver.zip -d /tmp/chromedriver && \
-    mv /tmp/chromedriver/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
-    chmod +x /usr/local/bin/chromedriver && \
-    rm -rf /tmp/chromedriver*
+# Create parent directory for Chrome user data
+RUN mkdir -p /tmp/chrome-data && chmod 777 /tmp/chrome-data
 
 
 # Copy requirements and install dependencies
@@ -59,6 +58,9 @@ ENV PORT=8000
 
 # Expose port
 EXPOSE ${PORT}
+
+# Copy the cookies file
+COPY twitter_cookies.json /app/cookies/twitter_cookies.json
 
 # Command to run the application
 CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

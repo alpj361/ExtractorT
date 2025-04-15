@@ -1,0 +1,92 @@
+[
+  {
+    "name": "__cf_bm",
+    "value": "Y3fT8LCyxw7ji67VPSIGCR...",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "auth_token",
+    "value": "fe294581ffba4fc9480cfccc...",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "ct0",
+    "value": "0674511b055772f00d6f651...",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "des_opt_in",
+    "value": "Y",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "dnt",
+    "value": "1",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "g_state",
+    "value": "{\"i_l\":0}",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "guest_id",
+    "value": "v1%3A174315168514037576",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "guest_id_ads",
+    "value": "v1%3A174315168514037576",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "guest_id_marketing",
+    "value": "v1%3A174315168514037576",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "kdt",
+    "value": "Erqt2mcSOauBpZ5QVHStFf...",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "lang",
+    "value": "es",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "night_mode",
+    "value": "2",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "personalization_id",
+    "value": "\"v1_qRvf...\"",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "ph_phc_TXdpocbG...",
+    "value": "%7B%22distinct_id%22%3A...",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "name": "twid",
+    "value": "u%3D823198186386976768",
+    "domain": "twitter.com",
+    "path": "/"
+  }
+]

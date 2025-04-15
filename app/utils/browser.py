@@ -20,35 +20,73 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:89.0) Gecko/20100101 Firefox/89.0",
 ]
 
+def _generate_user_data_dir():
+    """Generate a unique user data directory path."""
+    import uuid
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = str(uuid.uuid4())[:8]
+    base_dir = "/tmp/chrome-data" if os.environ.get("DOCKER_ENVIRONMENT") else "/tmp"
+    return os.path.join(base_dir, f"chrome_user_data_{timestamp}_{unique_id}")
+
 def setup_browser():
     """
     Set up a headless Chrome browser for scraping.
     
     Returns:
-        webdriver.Chrome: Configured Chrome webdriver instance
+        tuple: (webdriver.Chrome, str) - Configured Chrome webdriver instance and user data directory path
     """
     logger.info("Setting up headless Chrome browser")
     
-    # Configure Chrome options for headless operation
+    # Generate unique user data directory
+    user_data_dir = _generate_user_data_dir()
+    os.makedirs(user_data_dir, exist_ok=True)
+    logger.info(f"Created user data directory: {user_data_dir}")
+    
+    # Configure Chrome options for stealthy manual login
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    
+    # Basic setup
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     
-    # Explicitly set Chrome binary path in container
-    chrome_options.binary_location = "/usr/bin/google-chrome-stable"
+    # Use environment variables for Chrome and ChromeDriver paths
+    chrome_options.binary_location = os.environ.get('CHROME_BIN', '/usr/bin/chromium')
+    chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
     
-    # Rotate user agents to avoid detection
-    user_agent = random.choice(USER_AGENTS)
-    chrome_options.add_argument(f"--user-agent={user_agent}")
+    # Only use headless in production
+    if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
+        chrome_options.add_argument("--headless=new")  # New headless mode
     
-    # Disable images to improve performance
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    # Modern Chrome user agent
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    
+    # Additional stealth settings
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+    chrome_options.add_argument("--disable-site-isolation-trials")
+    
+    # Enable all needed features for login
+    prefs = {
+        "credentials_enable_service": True,
+        "profile.password_manager_enabled": True,
+        "profile.default_content_setting_values.notifications": 2,  # Block notifications
+        "profile.default_content_settings.popups": 0,  # Allow popups
+        "profile.default_content_setting_values.automatic_downloads": 1,
+        "profile.default_content_setting_values.plugins": 1,
+        "profile.default_content_setting_values.geolocation": 2,
+        "profile.managed_default_content_settings.images": 1,
+        "profile.default_content_setting_values.cookies": 1
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
     
     # Disable automation flags
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("excludeSwitches", [
+        "enable-automation",
+        "enable-logging"
+    ])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     
     # Use webdriver-manager in all environments
@@ -65,18 +103,22 @@ def setup_browser():
             chrome_options.add_argument("--disable-infobars")
             chrome_options.add_argument("--disable-notifications")
             
-            # Get Chrome version for logging
+            # Get Chromium version for logging
             import subprocess
             try:
-                chrome_version_output = subprocess.check_output(["google-chrome-stable", "--version"]).decode().strip()
-                logger.info(f"Installed Chrome: {chrome_version_output}")
+                chrome_version_output = subprocess.check_output([chrome_options.binary_location, "--version"]).decode().strip()
+                logger.info(f"Installed Chromium: {chrome_version_output}")
             except Exception as e:
-                logger.warning(f"Could not determine Chrome version: {str(e)}")
+                logger.warning(f"Could not determine Chromium version: {str(e)}")
         
-        # Use ChromeDriverManager to get the appropriate driver
-        logger.info("Using ChromeDriverManager to get appropriate ChromeDriver")
-        driver_path = ChromeDriverManager().install()
-        logger.info(f"ChromeDriver installed at: {driver_path}")
+        # Use the ChromeDriver path from environment variable or fallback to ChromeDriverManager
+        if os.path.exists(chromedriver_path):
+            logger.info(f"Using ChromeDriver from: {chromedriver_path}")
+            driver_path = chromedriver_path
+        else:
+            logger.info("Using ChromeDriverManager to get appropriate ChromeDriver")
+            driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+        logger.info(f"ChromeDriver path: {driver_path}")
         
         # Create service with the driver path
         service = Service(executable_path=driver_path)
@@ -103,7 +145,6 @@ def setup_browser():
         # Fallback 1: Try with explicit path
         try:
             logger.info("Fallback 1: Trying with explicit ChromeDriver path")
-            chromedriver_path = "/usr/local/bin/chromedriver"
             if os.path.exists(chromedriver_path):
                 logger.info(f"ChromeDriver found at: {chromedriver_path}")
                 service = Service(executable_path=chromedriver_path)
@@ -121,8 +162,8 @@ def setup_browser():
                 minimal_options.add_argument("--headless")
                 minimal_options.add_argument("--no-sandbox")
                 minimal_options.add_argument("--disable-dev-shm-usage")
-                minimal_options.binary_location = "/usr/bin/google-chrome-stable"
-                driver = webdriver.Chrome(options=minimal_options)
+                minimal_options.binary_location = chrome_options.binary_location
+                driver = webdriver.Chrome(service=Service(chromedriver_path), options=minimal_options)
                 logger.info("Chrome driver created with minimal options")
             except Exception as minimal_err:
                 logger.error(f"Fallback 2 failed: {str(minimal_err)}")
@@ -135,7 +176,17 @@ def setup_browser():
     # Set page load timeout
     driver.set_page_load_timeout(30)
     
-    return driver
+    return driver, user_data_dir
+
+def cleanup_user_data_dir(user_data_dir):
+    """Clean up Chrome user data directory."""
+    import shutil
+    try:
+        if os.path.exists(user_data_dir):
+            logger.info(f"Cleaning up user data directory: {user_data_dir}")
+            shutil.rmtree(user_data_dir)
+    except Exception as e:
+        logger.error(f"Error cleaning up user data directory: {str(e)}")
 
 def random_delay(min_seconds=1, max_seconds=3):
     """
