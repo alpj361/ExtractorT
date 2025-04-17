@@ -10,3 +10,4 @@ undetected-chromedriver==3.5.5
 chromedriver-py>=114.0.5735.90
 python-dotenv==1.0.0
 playwright==1.40.0
+nest_asyncio==1.5.1
