@@ -2,185 +2,259 @@ import logging
 import os
 import random
 import time
+import undetected_chromedriver as uc
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.chrome.service import Service
+import shutil
+import subprocess
 
 logger = logging.getLogger(__name__)
 
-# List of user agents to rotate
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:89.0) Gecko/20100101 Firefox/89.0",
-]
+# Configure Chrome paths
+if os.environ.get("DOCKER_ENVIRONMENT"):
+    profile_dir = "/chrome_profile"
+    chrome_binary = "/usr/bin/google-chrome-stable"
+    chromedriver_path = "/usr/local/bin/chromedriver"
+    # Log environment for debugging
+    logger.info(f"Running in Docker environment")
+    logger.info(f"Profile directory set to: {profile_dir}")
+    logger.info(f"Chrome binary path: {chrome_binary}")
+    logger.info(f"ChromeDriver path: {chromedriver_path}")
+else:
+    def get_profile_dir():
+        base_dir = os.path.join(os.path.expanduser("~"), ".chrome-profiles")
+        profile = os.path.join(base_dir, "twitter-profile")
+        os.makedirs(profile, exist_ok=True)
+        return profile
 
-def _generate_user_data_dir():
-    """Generate a unique user data directory path."""
-    import uuid
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_id = str(uuid.uuid4())[:8]
-    base_dir = "/tmp/chrome-data" if os.environ.get("DOCKER_ENVIRONMENT") else "/tmp"
-    return os.path.join(base_dir, f"chrome_user_data_{timestamp}_{unique_id}")
+    profile_dir = get_profile_dir()
+    chrome_binary = None
+    chromedriver_path = None
+
+def setup_xvfb():
+    """Set up Xvfb display for headless mode."""
+    if os.environ.get("DOCKER_ENVIRONMENT"):
+        try:
+            # Check if Xvfb is already running
+            result = subprocess.run(['pgrep', 'Xvfb'], capture_output=True, text=True)
+            if not result.stdout.strip():
+                subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1920x1080x24', '-ac'])
+                logger.info("Started Xvfb display server")
+                time.sleep(2)  # Give Xvfb time to start
+            else:
+                logger.info("Xvfb is already running")
+        except Exception as e:
+            logger.error(f"Failed to start Xvfb: {str(e)}")
+            raise
 
 def setup_browser():
     """
-    Set up a headless Chrome browser for scraping.
+    Set up Chrome browser with undetected-chromedriver and persistent profile.
     
     Returns:
-        tuple: (webdriver.Chrome, str) - Configured Chrome webdriver instance and user data directory path
+        tuple: (uc.Chrome, str) - Configured Chrome instance and profile directory path
     """
-    logger.info("Setting up headless Chrome browser")
+    logger.info("Setting up Chrome browser with undetected-chromedriver")
     
-    # Generate unique user data directory
-    user_data_dir = _generate_user_data_dir()
-    os.makedirs(user_data_dir, exist_ok=True)
-    logger.info(f"Created user data directory: {user_data_dir}")
+    # Set up Xvfb for headless mode
+    setup_xvfb()
     
-    # Configure Chrome options for stealthy manual login
-    chrome_options = Options()
-    
-    # Basic setup
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-    
-    # Use environment variables for Chrome and ChromeDriver paths
-    chrome_options.binary_location = os.environ.get('CHROME_BIN', '/usr/bin/chromium')
-    chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
-    
-    # Only use headless in production
-    if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
-        chrome_options.add_argument("--headless=new")  # New headless mode
-    
-    # Modern Chrome user agent
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-    
-    # Additional stealth settings
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--disable-features=IsolateOrigins,site-per-process")
-    chrome_options.add_argument("--disable-site-isolation-trials")
-    
-    # Enable all needed features for login
-    prefs = {
-        "credentials_enable_service": True,
-        "profile.password_manager_enabled": True,
-        "profile.default_content_setting_values.notifications": 2,  # Block notifications
-        "profile.default_content_settings.popups": 0,  # Allow popups
-        "profile.default_content_setting_values.automatic_downloads": 1,
-        "profile.default_content_setting_values.plugins": 1,
-        "profile.default_content_setting_values.geolocation": 2,
-        "profile.managed_default_content_settings.images": 1,
-        "profile.default_content_setting_values.cookies": 1
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
-    
-    # Disable automation flags
-    chrome_options.add_experimental_option("excludeSwitches", [
-        "enable-automation",
-        "enable-logging"
-    ])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    
-    # Use webdriver-manager in all environments
+    # Clean up any existing Chrome processes
     try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        from webdriver_manager.core.os_manager import ChromeType
-        
-        # Add additional options for containerized environment
-        if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT"):
-            logger.info("Running in container environment")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--remote-debugging-port=9222")
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-infobars")
-            chrome_options.add_argument("--disable-notifications")
-            
-            # Get Chromium version for logging
-            import subprocess
-            try:
-                chrome_version_output = subprocess.check_output([chrome_options.binary_location, "--version"]).decode().strip()
-                logger.info(f"Installed Chromium: {chrome_version_output}")
-            except Exception as e:
-                logger.warning(f"Could not determine Chromium version: {str(e)}")
-        
-        # Use the ChromeDriver path from environment variable or fallback to ChromeDriverManager
-        if os.path.exists(chromedriver_path):
-            logger.info(f"Using ChromeDriver from: {chromedriver_path}")
-            driver_path = chromedriver_path
-        else:
-            logger.info("Using ChromeDriverManager to get appropriate ChromeDriver")
-            driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
-        logger.info(f"ChromeDriver path: {driver_path}")
-        
-        # Create service with the driver path
-        service = Service(executable_path=driver_path)
-        
-        # Create driver
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        logger.info("Chrome driver created successfully")
-        
-        # Log Chrome and ChromeDriver versions for debugging
-        try:
-            chrome_version = driver.capabilities.get('browserVersion', 'unknown')
-            chromedriver_version = driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')
-            if isinstance(chromedriver_version, str) and ' ' in chromedriver_version:
-                chromedriver_version = chromedriver_version.split(' ')[0]
-            
-            logger.info(f"Chrome version: {chrome_version}")
-            logger.info(f"ChromeDriver version: {chromedriver_version}")
-        except Exception as version_err:
-            logger.warning(f"Could not determine browser versions: {str(version_err)}")
-            
+        if os.environ.get("DOCKER_ENVIRONMENT"):
+            logger.info("Checking for running Chrome processes...")
+            subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
+            time.sleep(1)  # Give time for processes to terminate
     except Exception as e:
-        logger.error(f"Error setting up ChromeDriverManager: {str(e)}")
-        
-        # Fallback 1: Try with explicit path
-        try:
-            logger.info("Fallback 1: Trying with explicit ChromeDriver path")
-            if os.path.exists(chromedriver_path):
-                logger.info(f"ChromeDriver found at: {chromedriver_path}")
-                service = Service(executable_path=chromedriver_path)
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                logger.info("Chrome driver created with explicit path")
-            else:
-                raise FileNotFoundError(f"ChromeDriver not found at {chromedriver_path}")
-        except Exception as fallback_err:
-            logger.error(f"Fallback 1 failed: {str(fallback_err)}")
+        logger.warning(f"Error cleaning up Chrome processes: {str(e)}")
+    
+    # Get persistent profile directory
+    logger.info(f"Using Chrome profile directory: {profile_dir}")
+    
+    # Remove lock files that might prevent browser startup
+    try:
+        lock_files = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
+        for lock_file in lock_files:
+            lock_path = os.path.join(profile_dir, lock_file)
+            if os.path.exists(lock_path):
+                logger.info(f"Removing lock file: {lock_path}")
+                os.remove(lock_path)
+    except Exception as e:
+        logger.warning(f"Error removing lock files: {str(e)}")
+    
+    # Verify Chrome profile directory exists and is accessible
+    if not os.path.exists(profile_dir):
+        logger.error(f"Chrome profile directory does not exist: {profile_dir}")
+        raise Exception("Chrome profile directory not found")
+    
+    try:
+        # Create Default directory if it doesn't exist
+        default_dir = os.path.join(profile_dir, "Default")
+        if not os.path.exists(default_dir):
+            logger.info(f"Creating Default directory in profile: {default_dir}")
+            os.makedirs(default_dir, exist_ok=True)
             
-            # Fallback 2: Try with minimal options
-            try:
-                logger.info("Fallback 2: Trying with minimal options")
-                minimal_options = Options()
-                minimal_options.add_argument("--headless")
-                minimal_options.add_argument("--no-sandbox")
-                minimal_options.add_argument("--disable-dev-shm-usage")
-                minimal_options.binary_location = chrome_options.binary_location
-                driver = webdriver.Chrome(service=Service(chromedriver_path), options=minimal_options)
-                logger.info("Chrome driver created with minimal options")
-            except Exception as minimal_err:
-                logger.error(f"Fallback 2 failed: {str(minimal_err)}")
+        # Create Preferences file if it doesn't exist
+        preferences_file = os.path.join(default_dir, "Preferences")
+        if not os.path.exists(preferences_file):
+            logger.info(f"Creating Preferences file: {preferences_file}")
+            with open(preferences_file, 'w') as f:
+                f.write('{}')
                 
-                # Fallback 3: Last resort, try without any customization
-                logger.info("Fallback 3: Last resort attempt")
-                driver = webdriver.Chrome()
-                logger.info("Chrome driver created with default settings")
-    
-    # Set page load timeout
-    driver.set_page_load_timeout(30)
-    
-    return driver, user_data_dir
+        # Try with undetected_chromedriver
+        max_retries = 3
+        retry_count = 0
+        last_error = None
+        
+        # Check if profile exists for headless mode decision
+        profile_exists = os.path.exists(os.path.join(profile_dir, "Default"))
+        
+        while retry_count < max_retries:
+            try:
+                # Configure Chrome options for undetected-chromedriver
+                options = uc.ChromeOptions()
+                
+                # Basic Chrome arguments
+                options.add_argument("--remote-debugging-port=9222")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--window-size=1920,1080")
+                options.add_argument("--disable-extensions")
+                options.add_argument("--disable-setuid-sandbox")
+                options.add_argument("--disable-infobars")
+                
+                # Use a random profile subdirectory to avoid "already in use" errors
+                if retry_count > 0:  # Only on retry attempts
+                    temp_profile_dir = f"{profile_dir}_{random.randint(1000, 9999)}"
+                    try:
+                        if not os.path.exists(temp_profile_dir):
+                            logger.info(f"Creating temporary profile at {temp_profile_dir}")
+                            shutil.copytree(profile_dir, temp_profile_dir, dirs_exist_ok=True)
+                        options.add_argument(f"--user-data-dir={temp_profile_dir}")
+                        logger.info(f"Using temporary profile: {temp_profile_dir}")
+                    except Exception as e:
+                        logger.warning(f"Error creating temp profile: {str(e)}")
+                        options.add_argument(f"--user-data-dir={profile_dir}")
+                else:
+                    options.add_argument(f"--user-data-dir={profile_dir}")
+                
+                options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+                options.add_argument("--log-level=3")  # Reduce logging
+                options.add_argument("--disable-blink-features=AutomationControlled")
+                
+                # Set Chrome binary path if in Docker
+                if os.environ.get("DOCKER_ENVIRONMENT") and chrome_binary:
+                    if os.path.exists(chrome_binary):
+                        options.binary_location = chrome_binary
+                        logger.info(f"Set Chrome binary location to {chrome_binary}")
+                
+                # Only use headless in production and if profile exists
+                if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT")) and profile_exists:
+                    logger.info("Using headless mode with existing profile")
+                    options.add_argument("--headless=new")
+                    options.add_argument("--remote-debugging-port=9222")
+                    options.add_argument("--disable-software-rasterizer")
+                    logger.info("*** Remote debugging enabled on port 9222 ***")
+                else:
+                    logger.info("Running in visible mode for manual login or debugging")
+                
+                # Additional settings
+                prefs = {
+                    "credentials_enable_service": True,
+                    "profile.password_manager_enabled": True,
+                    "profile.default_content_setting_values.notifications": 2,
+                    "profile.default_content_settings.popups": 0,
+                    "profile.default_content_setting_values.automatic_downloads": 1
+                }
+                options.add_experimental_option("prefs", prefs)
+                
+                # Create driver with undetected_chromedriver
+                try:
+                    driver = uc.Chrome(
+                        options=options,
+                        driver_executable_path=chromedriver_path,
+                        browser_executable_path=chrome_binary,
+                        use_subprocess=True,
+                        version_main=135
+                    )
+                    logger.info("Chrome driver created successfully with undetected-chromedriver")
+                except Exception as e:
+                    logger.warning(f"Failed to create undetected_chromedriver: {str(e)}")
+                    logger.info("Falling back to regular selenium webdriver")
+                    
+                    # Fall back to regular selenium webdriver
+                    options = webdriver.ChromeOptions()
+                    options.add_argument("--no-sandbox")
+                    options.add_argument("--disable-dev-shm-usage")
+                    options.add_argument("--disable-gpu")
+                    options.add_argument("--window-size=1920,1080")
+                    
+                    # Add random subdir to avoid "already in use" errors
+                    temp_profile_dir = f"{profile_dir}_{random.randint(1000, 9999)}"
+                    try:
+                        # If we got "already in use" error, copy the profile to a temporary directory
+                        if not os.path.exists(temp_profile_dir):
+                            logger.info(f"Creating temporary profile at {temp_profile_dir}")
+                            shutil.copytree(profile_dir, temp_profile_dir, dirs_exist_ok=True)
+                        options.add_argument(f"--user-data-dir={temp_profile_dir}")
+                    except Exception as e:
+                        logger.warning(f"Error creating temp profile, using original: {str(e)}")
+                        options.add_argument(f"--user-data-dir={profile_dir}")
+                    
+                    options.add_argument("--disable-extensions")
+                    options.add_argument("--disable-infobars")
+                    options.add_argument("--disable-blink-features=AutomationControlled")
+                    
+                    if os.environ.get("DOCKER_ENVIRONMENT") and chrome_binary:
+                        options.binary_location = chrome_binary
+                    
+                    if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("DOCKER_ENVIRONMENT")) and profile_exists:
+                        options.add_argument("--headless=new")
+                        options.add_argument("--remote-debugging-port=9222")
+                        options.add_argument("--disable-software-rasterizer")
+                        logger.info("*** Remote debugging enabled on port 9222 (fallback driver) ***")
+                    
+                    service = Service(executable_path=chromedriver_path)
+                    driver = webdriver.Chrome(
+                        service=service,
+                        options=options
+                    )
+                    logger.info("Chrome driver created successfully with regular selenium webdriver")
+                
+                # Set page load timeout
+                driver.set_page_load_timeout(30)
+                
+                # Test browser working
+                driver.get("about:blank")
+                logger.info("Browser test page loaded successfully")
+                
+                # Additional browser checks
+                if not driver.current_url:
+                    raise Exception("Browser initialization failed - no current URL")
+                
+                return driver, profile_dir
+                
+            except Exception as e:
+                last_error = e
+                retry_count += 1
+                logger.warning(f"Attempt {retry_count} failed: {str(e)}")
+                time.sleep(2)  # Wait before retrying
+                
+        logger.error(f"Failed to create Chrome driver after {max_retries} attempts. Last error: {str(last_error)}")
+        raise last_error
+        
+    except Exception as e:
+        logger.error(f"Error setting up Chrome driver: {str(e)}")
+        raise
 
 def cleanup_user_data_dir(user_data_dir):
     """Clean up Chrome user data directory."""
-    import shutil
     try:
         if os.path.exists(user_data_dir):
             logger.info(f"Cleaning up user data directory: {user_data_dir}")
