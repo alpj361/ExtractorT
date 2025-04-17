@@ -115,6 +115,10 @@ ENV DISPLAY=:99
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright and its browsers with proper permissions
+RUN playwright install --with-deps chromium firefox webkit && \
+    chmod -R 777 /root/.cache/ms-playwright
+
 # Copy application code
 COPY . .
 
@@ -153,6 +157,15 @@ echo "Testing Chrome installation..."\n\
 google-chrome-stable --version\n\
 echo "Testing Chromedriver installation..."\n\
 chromedriver --version\n\
+echo "Verifying Playwright browsers:"\n\
+if [ -d "/root/.cache/ms-playwright" ]; then\n\
+  echo "Playwright browser cache directory exists:"\n\
+  ls -la /root/.cache/ms-playwright\n\
+else\n\
+  echo "WARNING: Playwright browser cache directory does not exist"\n\
+  echo "Installing Playwright browsers now:"\n\
+  playwright install --with-deps chromium firefox webkit\n\
+fi\n\
 echo "Starting application server..."\n\
 uvicorn app.main:app --host 0.0.0.0 --port ${PORT}' > /app/start.sh && \
     chmod +x /app/start.sh
