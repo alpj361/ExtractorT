@@ -85,27 +85,56 @@ ENV PYTHONUNBUFFERED=1
 ENV DOCKER_ENVIRONMENT=1
 ENV PORT=8000
 
+# Firefox specific environment variables for better stability in container environments
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+ENV MOZ_HEADLESS=1
+ENV MOZ_DISABLE_GMP_SANDBOX=1
+ENV MOZ_DISABLE_CONTENT_SANDBOX=1
+ENV MOZ_DISABLE_RDD_SANDBOX=1
+# Set lower memory settings for Firefox
+ENV MOZ_MEMORY_LOW=1
+ENV MOZ_DISABLE_CONTENT_PROCESS_SANDBOX=1
+
+# Configure browsers to use less memory
+RUN echo 'export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="none"' >> /etc/environment && \
+    echo 'export PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH="none"' >> /etc/environment && \
+    echo 'export DISPLAY=:99' >> /etc/environment
+
+# Create /tmp directory with proper permissions
+RUN mkdir -p /tmp && chmod 777 /tmp
+
 # Expose port
 EXPOSE ${PORT}
 
-# Increase shared memory size for the browser
-RUN mount -t tmpfs -o remount,size=2G,noatime tmpfs /dev/shm || true
-
-# Modify launch script to include memory settings
+# Create improved script to start the application
 RUN echo '#!/bin/bash\n\
 echo "Starting container with the following environment:"\n\
 echo "DOCKER_ENVIRONMENT=$DOCKER_ENVIRONMENT"\n\
-echo "Configuring system resources..."\n\
-# Try to increase shared memory if possible\n\
-if [ -d "/dev/shm" ]; then\n\
-  mount -t tmpfs -o remount,size=2G,noatime tmpfs /dev/shm || echo "Could not increase shared memory"\n\
+echo "RAILWAY_ENVIRONMENT=$RAILWAY_ENVIRONMENT"\n\
+\n\
+# Report system resources\n\
+echo "System resources:"\n\
+if command -v free &> /dev/null; then\n\
+  free -h\n\
+else\n\
+  echo "Memory info command not available"\n\
 fi\n\
-# Report system memory\n\
-free -h || echo "free command not available"\n\
+\n\
+# Configure browser settings for limited resources\n\
+export PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright\n\
+export MOZ_HEADLESS=1\n\
+export MOZ_MEMORY_LOW=1\n\
+export MOZ_DISABLE_GMP_SANDBOX=1\n\
+export MOZ_DISABLE_CONTENT_SANDBOX=1\n\
+export MOZ_DISABLE_RDD_SANDBOX=1\n\
+export MOZ_DISABLE_CONTENT_PROCESS_SANDBOX=1\n\
+\n\
+# Start Xvfb for headless browser\n\
 echo "Starting Xvfb..."\n\
-Xvfb :99 -screen 0 1920x1080x24 -ac &\n\
+Xvfb :99 -screen 0 1280x960x24 -ac &\n\
 sleep 2\n\
 export DISPLAY=:99\n\
+\n\
 echo "Verifying Playwright browsers:"\n\
 if [ -d "/root/.cache/ms-playwright" ]; then\n\
   echo "Playwright browser cache directory exists:"\n\
@@ -115,17 +144,14 @@ else\n\
   echo "Installing Playwright browsers now:"\n\
   playwright install --with-deps firefox\n\
 fi\n\
-echo "Starting Recent Tweets Extractor API with resource limits..."\n\
-# Run with increased memory limits\n\
+\n\
+# Create and set permissions for temporary directories\n\
+mkdir -p /tmp /dev/shm /tmp/firefox_cache\n\
+chmod 777 /tmp /dev/shm /tmp/firefox_cache\n\
+\n\
+echo "Starting Recent Tweets Extractor API with resource optimization..."\n\
 python docker_extract_recent.py' > /app/start_recent.sh && \
     chmod +x /app/start_recent.sh
-
-# Add environment variable for Firefox stability in Docker
-ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
-ENV MOZ_HEADLESS=1
-ENV MOZ_DISABLE_GMP_SANDBOX=1
-ENV MOZ_DISABLE_CONTENT_SANDBOX=1
-ENV MOZ_DISABLE_RDD_SANDBOX=1
 
 # Command to run the application
 CMD ["/app/start_recent.sh"] 
