@@ -395,6 +395,8 @@ async def ensure_valid_storage():
     
     return True 
 
+MAX_RETRIES = 3  # Número máximo de reintentos para operaciones de navegador
+
 async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scrolls=10):
     """
     Extrae SOLO tweets recientes usando EXCLUSIVAMENTE la URL de búsqueda con filtro "live"
@@ -404,9 +406,23 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
     logger.info(f"Parámetros: max_tweets={max_tweets}, min_tweets={min_tweets}, max_scrolls={max_scrolls}")
     
     # Verificar y asegurar cookies válidas
-    if not await ensure_valid_storage():
-        logger.error("No se pudieron obtener cookies válidas, abortando extracción")
-        return []
+    for attempt in range(MAX_RETRIES):
+        try:
+            if not await ensure_valid_storage():
+                logger.error("No se pudieron obtener cookies válidas, abortando extracción")
+                return []
+            break
+        except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                if attempt < MAX_RETRIES - 1:
+                    logger.warning(f"El navegador se cerró inesperadamente durante la validación de cookies (intento {attempt+1}/{MAX_RETRIES}). Reintentando...")
+                    await asyncio.sleep(2)  # Esperar un poco antes de reintentar
+                else:
+                    logger.error(f"Error persistente al validar cookies después de {MAX_RETRIES} intentos: {e}")
+                    return []
+            else:
+                logger.error(f"Error al validar cookies: {e}")
+                return []
     
     # Obtener fechas para filtros dinámicos
     now = datetime.utcnow()
@@ -440,218 +456,263 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
         
     launch_options["args"] = firefox_args
     
-    async with async_playwright() as p:
-        # Usar Firefox para consistencia
-        browser = await p.firefox.launch(**launch_options)
-        
-        context_options = {"storage_state": STORAGE_FILE}
-        context = await browser.new_context(**context_options)
-        page = await context.new_page()
-        
+    # Control de reintentos para problemas de navegador
+    for browser_attempt in range(MAX_RETRIES):
         try:
-            # Configurar tiempos de espera más cortos para evitar bloqueos
-            page.set_default_timeout(15000)  # 15 segundos en lugar de 30
-            
-            # Lista de URLs a intentar, OPTIMIZADA para tweets recientes y con contenido
-            search_urls = [
-                # MÉTODO QUE FUNCIONÓ - Búsqueda directa con f=live (primer intento)
-                f"https://x.com/search?q=from%3A{username}&f=live",
+            async with async_playwright() as p:
+                # Usar Firefox para consistencia
+                browser = await p.firefox.launch(**launch_options)
                 
-                # Ir directamente al perfil para tweets más completos
-                f"https://x.com/{username}",
-                
-                # Búsqueda con rango amplio para asegurar volumen de tweets - última semana
-                f"https://x.com/search?q=from%3A{username}%20since%3A{last_week}&f=live",
-                
-                # Búsqueda con parámetro específico de fecha (último mes) para capturar más tweets
-                f"https://x.com/search?q=from%3A{username}%20since%3A{last_month}&f=live"
-            ]
-            
-            all_tweets = []
-            login_error = False
-            
-            for url_index, search_url in enumerate(search_urls):
-                if len(all_tweets) >= max_tweets * 1.5:  # Si ya tenemos 1.5x el número deseado, podemos parar
-                    logger.info(f"Ya se recolectaron suficientes tweets ({len(all_tweets)}), deteniendo búsqueda")
-                    break
-                    
-                logger.info(f"Intento #{url_index+1}: Navegando a búsqueda: {search_url}")
-                
-                await page.goto(search_url, wait_until="domcontentloaded")
-                await asyncio.sleep(5)  # Esperar a que cargue la página
-                
-                # Verificar URL actual
-                current_url = page.url
-                logger.info(f"URL actual: {current_url}")
-                
-                # Verificar si fuimos redirigidos a login
-                if "/login" in current_url or "/i/flow/login" in current_url:
-                    logger.warning("Redirigido a login, la sesión expiró. Iniciando login automático...")
-                    
-                    screenshot_path = "/tmp/login_redirect.png" if DOCKER_ENVIRONMENT else f"login_redirect_{username}_{url_index}.png"
-                    await page.screenshot(path=screenshot_path)
-                    
-                    # Cerrar la sesión actual y navegador
-                    await browser.close()
-                    
-                    # Realizar un nuevo login
-                    login_success = await perform_login()
-                    if not login_success:
-                        logger.error("No se pudo iniciar sesión de nuevo. Abortando extracción.")
-                        login_error = True
-                        break
-                    
-                    # Reiniciar el navegador con las nuevas cookies
-                    browser = await p.firefox.launch(**launch_options)
-                    context = await browser.new_context(storage_state=STORAGE_FILE)
+                try:
+                    context_options = {"storage_state": STORAGE_FILE}
+                    context = await browser.new_context(**context_options)
                     page = await context.new_page()
-                    page.set_default_timeout(15000)
                     
-                    # Volver a intentar la URL actual
-                    logger.info(f"Reintentando URL después de renovar sesión: {search_url}")
-                    await page.goto(search_url, wait_until="domcontentloaded")
-                    await asyncio.sleep(5)
+                    # Aumentar los tiempos de espera por defecto para evitar errores de timeout
+                    page.set_default_timeout(30000)  # 30 segundos en entornos Docker/Railway
                     
-                    # Verificar URL de nuevo
-                    current_url = page.url
-                    if "/login" in current_url or "/i/flow/login" in current_url:
-                        logger.error("Seguimos siendo redirigidos a login a pesar del nuevo inicio de sesión.")
-                        login_error = True
-                        break
-                
-                # Forzar la pestaña "Latest" si hay pestañas disponibles y si estamos en una búsqueda
-                if "search" in current_url and "f=live" not in current_url:
-                    latest_tab = await page.query_selector('a[href*="f=live"], a:has-text("Latest"), a:has-text("Recientes")')
-                    if latest_tab:
-                        logger.info("Seleccionando pestaña 'Latest/Recientes'")
-                        await latest_tab.click()
-                        await asyncio.sleep(3)
-                
-                # Scroll inicial para asegurar carga completa
-                logger.info("Realizando desplazamiento inicial para cargar la página completamente")
-                for i in range(3):
-                    await page.evaluate('window.scrollBy(0, 1000)')
-                    await asyncio.sleep(1)
-                
-                # Capturar pantalla para diagnóstico (solo en entorno no Docker)
-                if not DOCKER_ENVIRONMENT:
-                    screenshot_path = f"page_initial_{username}_{url_index}.png"
-                    await page.screenshot(path=screenshot_path)
-                    logger.info(f"Captura inicial guardada: {screenshot_path}")
-                
-                # Scroll AGRESIVO para cargar más tweets
-                logger.info(f"Iniciando desplazamiento AGRESIVO para cargar tweets (máx {max_scrolls})")
-                
-                tweet_count_previous = 0
-                no_new_tweets_count = 0
-                
-                for scroll_idx in range(max_scrolls):
-                    logger.info(f"Desplazamiento {scroll_idx+1}/{max_scrolls}")
-                    
-                    # Desplazar hacia abajo con movimiento agresivo
-                    await page.evaluate('window.scrollBy(0, 2500)')
-                    await asyncio.sleep(1)
-                    
-                    # Verificar cada 2 scrolls o en el último
-                    if scroll_idx % 2 == 0 or scroll_idx == max_scrolls - 1:
-                        # Contar tweets después de desplazar
-                        tweet_count = await _count_tweets(page)
-                        logger.info(f"Tweets encontrados tras desplazamiento {scroll_idx+1}: {tweet_count}")
+                    # Lista de URLs a intentar, OPTIMIZADA para tweets recientes y con contenido
+                    search_urls = [
+                        # MÉTODO QUE FUNCIONÓ - Búsqueda directa con f=live (primer intento)
+                        f"https://x.com/search?q=from%3A{username}&f=live",
                         
-                        # Detectar si ya no aparecen nuevos tweets
-                        if tweet_count == tweet_count_previous:
-                            no_new_tweets_count += 1
-                            if no_new_tweets_count >= 3:  # Si 3 veces seguidas no hay nuevos tweets
-                                logger.info(f"No se detectan nuevos tweets después de {no_new_tweets_count} intentos, deteniendo scrolls")
-                                break
-                        else:
-                            no_new_tweets_count = 0
-                            tweet_count_previous = tweet_count
+                        # Ir directamente al perfil para tweets más completos
+                        f"https://x.com/{username}",
                         
-                        # Tomar screenshots ocasionalmente (solo en entorno no Docker)
-                        if not DOCKER_ENVIRONMENT and scroll_idx % 4 == 0:
-                            screenshot_path = f"page_scroll_{username}_{url_index}_{scroll_idx}.png"
-                            await page.screenshot(path=screenshot_path)
-                            logger.info(f"Captura guardada: {screenshot_path}")
+                        # Búsqueda con rango amplio para asegurar volumen de tweets - última semana
+                        f"https://x.com/search?q=from%3A{username}%20since%3A{last_week}&f=live",
                         
-                        # Si encontramos suficientes tweets, podemos parar
-                        if tweet_count >= max_tweets * 3:  # Extraer el triple para tener margen de filtrado
-                            logger.info(f"Se encontraron suficientes tweets ({tweet_count}), deteniendo desplazamiento")
+                        # Búsqueda con parámetro específico de fecha (último mes) para capturar más tweets
+                        f"https://x.com/search?q=from%3A{username}%20since%3A{last_month}&f=live"
+                    ]
+                    
+                    all_tweets = []
+                    login_error = False
+                    
+                    for url_index, search_url in enumerate(search_urls):
+                        if len(all_tweets) >= max_tweets * 1.5:  # Si ya tenemos 1.5x el número deseado, podemos parar
+                            logger.info(f"Ya se recolectaron suficientes tweets ({len(all_tweets)}), deteniendo búsqueda")
                             break
-                
-                # Extraer datos de tweets para esta URL
-                logger.info(f"Extrayendo datos de tweets desde URL #{url_index+1}...")
-                current_tweets = await _extract_tweets_data(page, max_tweets*2)  # Extraer el doble para tener margen
-                
-                if current_tweets and len(current_tweets) > 0:
-                    logger.info(f"Se encontraron {len(current_tweets)} tweets en URL #{url_index+1}")
+                        
+                        try:
+                            logger.info(f"Intento #{url_index+1}: Navegando a búsqueda: {search_url}")
+                            
+                            # Manejar errores de navegación con reintentos
+                            for nav_attempt in range(3):  # Máximo 3 intentos para navegar
+                                try:
+                                    await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                                    break
+                                except Exception as nav_error:
+                                    if "Target page, context or browser has been closed" in str(nav_error):
+                                        raise nav_error  # Si el navegador está cerrado, salir del bucle principal
+                                    if nav_attempt < 2:  # Si no es el último intento
+                                        logger.warning(f"Error al navegar (intento {nav_attempt+1}/3): {nav_error}. Reintentando...")
+                                        await asyncio.sleep(2)
+                                    else:
+                                        logger.error(f"Error persistente al navegar después de 3 intentos: {nav_error}")
+                                        continue  # Intentar con la siguiente URL
+                            
+                            await asyncio.sleep(5)  # Esperar a que cargue la página
+                            
+                            # Verificar URL actual
+                            current_url = page.url
+                            logger.info(f"URL actual: {current_url}")
+                            
+                            # Verificar si fuimos redirigidos a login
+                            if "/login" in current_url or "/i/flow/login" in current_url:
+                                logger.warning("Redirigido a login, la sesión expiró. Iniciando login automático...")
+                                
+                                screenshot_path = "/tmp/login_redirect.png" if DOCKER_ENVIRONMENT else f"login_redirect_{username}_{url_index}.png"
+                                await page.screenshot(path=screenshot_path)
+                                
+                                # Cerrar la sesión actual y navegador
+                                await browser.close()
+                                
+                                # Realizar un nuevo login
+                                login_success = await perform_login()
+                                if not login_success:
+                                    logger.error("No se pudo iniciar sesión de nuevo. Abortando extracción.")
+                                    login_error = True
+                                    break
+                                
+                                # Reiniciar el navegador con las nuevas cookies
+                                browser = await p.firefox.launch(**launch_options)
+                                context = await browser.new_context(storage_state=STORAGE_FILE)
+                                page = await context.new_page()
+                                page.set_default_timeout(15000)
+                                
+                                # Volver a intentar la URL actual
+                                logger.info(f"Reintentando URL después de renovar sesión: {search_url}")
+                                await page.goto(search_url, wait_until="domcontentloaded")
+                                await asyncio.sleep(5)
+                                
+                                # Verificar URL de nuevo
+                                current_url = page.url
+                                if "/login" in current_url or "/i/flow/login" in current_url:
+                                    logger.error("Seguimos siendo redirigidos a login a pesar del nuevo inicio de sesión.")
+                                    login_error = True
+                                    break
+                            
+                            # Forzar la pestaña "Latest" si hay pestañas disponibles y si estamos en una búsqueda
+                            if "search" in current_url and "f=live" not in current_url:
+                                latest_tab = await page.query_selector('a[href*="f=live"], a:has-text("Latest"), a:has-text("Recientes")')
+                                if latest_tab:
+                                    logger.info("Seleccionando pestaña 'Latest/Recientes'")
+                                    await latest_tab.click()
+                                    await asyncio.sleep(3)
+                            
+                            # Scroll inicial para asegurar carga completa
+                            logger.info("Realizando desplazamiento inicial para cargar la página completamente")
+                            for i in range(3):
+                                await page.evaluate('window.scrollBy(0, 1000)')
+                                await asyncio.sleep(1)
+                            
+                            # Capturar pantalla para diagnóstico (solo en entorno no Docker)
+                            if not DOCKER_ENVIRONMENT:
+                                screenshot_path = f"page_initial_{username}_{url_index}.png"
+                                await page.screenshot(path=screenshot_path)
+                                logger.info(f"Captura inicial guardada: {screenshot_path}")
+                            
+                            # Scroll AGRESIVO para cargar más tweets
+                            logger.info(f"Iniciando desplazamiento AGRESIVO para cargar tweets (máx {max_scrolls})")
+                            
+                            tweet_count_previous = 0
+                            no_new_tweets_count = 0
+                            
+                            for scroll_idx in range(max_scrolls):
+                                logger.info(f"Desplazamiento {scroll_idx+1}/{max_scrolls}")
+                                
+                                # Desplazar hacia abajo con movimiento agresivo
+                                await page.evaluate('window.scrollBy(0, 2500)')
+                                await asyncio.sleep(1)
+                                
+                                # Verificar cada 2 scrolls o en el último
+                                if scroll_idx % 2 == 0 or scroll_idx == max_scrolls - 1:
+                                    # Contar tweets después de desplazar
+                                    tweet_count = await _count_tweets(page)
+                                    logger.info(f"Tweets encontrados tras desplazamiento {scroll_idx+1}: {tweet_count}")
+                                    
+                                    # Detectar si ya no aparecen nuevos tweets
+                                    if tweet_count == tweet_count_previous:
+                                        no_new_tweets_count += 1
+                                        if no_new_tweets_count >= 3:  # Si 3 veces seguidas no hay nuevos tweets
+                                            logger.info(f"No se detectan nuevos tweets después de {no_new_tweets_count} intentos, deteniendo scrolls")
+                                            break
+                                    else:
+                                        no_new_tweets_count = 0
+                                        tweet_count_previous = tweet_count
+                                    
+                                    # Tomar screenshots ocasionalmente (solo en entorno no Docker)
+                                    if not DOCKER_ENVIRONMENT and scroll_idx % 4 == 0:
+                                        screenshot_path = f"page_scroll_{username}_{url_index}_{scroll_idx}.png"
+                                        await page.screenshot(path=screenshot_path)
+                                        logger.info(f"Captura guardada: {screenshot_path}")
+                                    
+                                    # Si encontramos suficientes tweets, podemos parar
+                                    if tweet_count >= max_tweets * 3:  # Extraer el triple para tener margen de filtrado
+                                        logger.info(f"Se encontraron suficientes tweets ({tweet_count}), deteniendo desplazamiento")
+                                        break
+                            
+                            # Extraer datos de tweets para esta URL
+                            logger.info(f"Extrayendo datos de tweets desde URL #{url_index+1}...")
+                            current_tweets = await _extract_tweets_data(page, max_tweets*2)  # Extraer el doble para tener margen
+                            
+                            if current_tweets and len(current_tweets) > 0:
+                                logger.info(f"Se encontraron {len(current_tweets)} tweets en URL #{url_index+1}")
+                                
+                                # Agregar a la lista general, evitando duplicados
+                                existing_ids = {t['tweet_id'] for t in all_tweets}
+                                new_tweets = [t for t in current_tweets if t['tweet_id'] not in existing_ids]
+                                
+                                if new_tweets:
+                                    logger.info(f"Añadiendo {len(new_tweets)} tweets no duplicados a la lista general")
+                                    all_tweets.extend(new_tweets)
+                            else:
+                                logger.warning(f"No se encontraron tweets en URL #{url_index+1}")
+                        
+                        except Exception as url_error:
+                            if "Target page, context or browser has been closed" in str(url_error):
+                                raise url_error  # Propagar el error para reiniciar todo el proceso
+                            logger.error(f"Error procesando URL #{url_index+1}: {url_error}")
+                            continue  # Intentar con la siguiente URL
                     
-                    # Agregar a la lista general, evitando duplicados
-                    existing_ids = {t['tweet_id'] for t in all_tweets}
-                    new_tweets = [t for t in current_tweets if t['tweet_id'] not in existing_ids]
+                    # Verificar si hubo un error de login que no se pudo resolver
+                    if login_error:
+                        logger.error("La extracción se detuvo debido a un problema persistente con la sesión.")
+                        return []
                     
-                    if new_tweets:
-                        logger.info(f"Añadiendo {len(new_tweets)} tweets no duplicados a la lista general")
-                        all_tweets.extend(new_tweets)
-                else:
-                    logger.warning(f"No se encontraron tweets en URL #{url_index+1}")
-            
-            # Verificar si hubo un error de login que no se pudo resolver
-            if login_error:
-                logger.error("La extracción se detuvo debido a un problema persistente con la sesión.")
-                return []
-            
-            # Guardar el HTML de la página final para diagnóstico en entorno Docker
-            if DOCKER_ENVIRONMENT:
-                html_content = await page.content()
-                with open(f"/tmp/final_page_content_{username}.html", "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                logger.info(f"HTML de la página final guardado en /tmp/final_page_content_{username}.html")
-            
-            # Ordenar tweets por timestamp (más recientes primero)
-            if all_tweets:
-                # Primero filtrar tweets sin contenido (eliminar analytics, photo, etc.)
-                filtered_tweets = [t for t in all_tweets if not (
-                    "photo" in t['tweet_id'] or 
-                    "analytics" in t['tweet_id'] or 
-                    t['text'].startswith("[Contenido no disponible") or
-                    len(t['text']) < 10  # Eliminar tweets demasiado cortos
-                )]
-                
-                logger.info(f"Filtrados {len(all_tweets) - len(filtered_tweets)} tweets sin contenido real")
-                
-                # Ordenar por fecha, más recientes primero
-                filtered_tweets.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-                logger.info(f"Total de tweets extraídos, filtrados y ordenados: {len(filtered_tweets)}")
-                
-                # Mostrar info de los tweets más recientes para debug
-                if len(filtered_tweets) > 0:
+                    # Guardar el HTML de la página final para diagnóstico en entorno Docker
+                    if DOCKER_ENVIRONMENT:
+                        html_content = await page.content()
+                        with open(f"/tmp/final_page_content_{username}.html", "w", encoding="utf-8") as f:
+                            f.write(html_content)
+                        logger.info(f"HTML de la página final guardado en /tmp/final_page_content_{username}.html")
+                    
+                    # Ordenar tweets por timestamp (más recientes primero)
+                    if all_tweets:
+                        # Primero filtrar tweets sin contenido (eliminar analytics, photo, etc.)
+                        filtered_tweets = [t for t in all_tweets if not (
+                            "photo" in t['tweet_id'] or 
+                            "analytics" in t['tweet_id'] or 
+                            t['text'].startswith("[Contenido no disponible") or
+                            len(t['text']) < 10  # Eliminar tweets demasiado cortos
+                        )]
+                        
+                        logger.info(f"Filtrados {len(all_tweets) - len(filtered_tweets)} tweets sin contenido real")
+                        
+                        # Ordenar por fecha, más recientes primero
+                        filtered_tweets.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                        logger.info(f"Total de tweets extraídos, filtrados y ordenados: {len(filtered_tweets)}")
+                        
+                        # Mostrar info de los tweets más recientes para debug
+                        if len(filtered_tweets) > 0:
+                            try:
+                                most_recent = filtered_tweets[0]
+                                date_str = datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                                logger.info(f"Tweet más reciente: {date_str} - {most_recent['text'][:50]}...")
+                            except Exception as e:
+                                logger.error(f"Error al mostrar información del tweet más reciente: {e}")
+                        
+                        # Asignar a la variable de retorno, limitando al máximo
+                        tweets = filtered_tweets[:max_tweets]
+                    else:
+                        logger.warning("No se encontraron tweets en ningún intento")
+                    
+                except Exception as e:
+                    if "Target page, context or browser has been closed" in str(e):
+                        raise e  # Propagar el error para reiniciar todo el proceso
+                    logger.error(f"Error durante la extracción: {e}")
+                    logger.error(traceback.format_exc())
+                    
+                    # Capturar pantalla en caso de error
                     try:
-                        most_recent = filtered_tweets[0]
-                        date_str = datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
-                        logger.info(f"Tweet más reciente: {date_str} - {most_recent['text'][:50]}...")
-                    except Exception as e:
-                        logger.error(f"Error al mostrar información del tweet más reciente: {e}")
+                        screenshot_path = "/tmp/error.png" if DOCKER_ENVIRONMENT else f"error_{username}.png"
+                        await page.screenshot(path=screenshot_path)
+                        logger.info(f"Captura de error guardada: {screenshot_path}")
+                    except Exception as screenshot_error:
+                        logger.warning(f"No se pudo capturar pantalla de error: {screenshot_error}")
                 
-                # Asignar a la variable de retorno, limitando al máximo
-                tweets = filtered_tweets[:max_tweets]
+                finally:
+                    try:
+                        await browser.close()
+                        logger.info("Navegador cerrado correctamente")
+                    except Exception as close_error:
+                        logger.warning(f"Error al cerrar el navegador: {close_error}")
+            
+            # Si llegamos aquí sin excepciones, salir del bucle de reintentos
+            break
+            
+        except Exception as browser_error:
+            if "Target page, context or browser has been closed" in str(browser_error):
+                if browser_attempt < MAX_RETRIES - 1:
+                    logger.warning(f"El navegador se cerró inesperadamente (intento {browser_attempt+1}/{MAX_RETRIES}). Reintentando...")
+                    await asyncio.sleep(3)  # Esperar un poco más entre reintentos
+                else:
+                    logger.error(f"Error persistente con el navegador después de {MAX_RETRIES} intentos: {browser_error}")
             else:
-                logger.warning("No se encontraron tweets en ningún intento")
-            
-        except Exception as e:
-            logger.error(f"Error durante la extracción: {e}")
-            
-            # Capturar pantalla en caso de error
-            try:
-                screenshot_path = "/tmp/error.png" if DOCKER_ENVIRONMENT else f"error_{username}.png"
-                await page.screenshot(path=screenshot_path)
-                logger.info(f"Captura de error guardada: {screenshot_path}")
-            except:
-                pass
-            
-        finally:
-            await browser.close()
-            logger.info("Navegador cerrado")
+                logger.error(f"Error fatal durante la extracción: {browser_error}")
+                logger.error(traceback.format_exc())
+                break
     
     total_tweets = len(tweets)
     logger.info(f"Total de tweets RECIENTES extraídos: {total_tweets}")

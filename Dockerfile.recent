@@ -88,13 +88,24 @@ ENV PORT=8000
 # Expose port
 EXPOSE ${PORT}
 
-# Create a script to start Xvfb and then run the new application script
+# Increase shared memory size for the browser
+RUN mount -t tmpfs -o remount,size=2G,noatime tmpfs /dev/shm || true
+
+# Modify launch script to include memory settings
 RUN echo '#!/bin/bash\n\
 echo "Starting container with the following environment:"\n\
 echo "DOCKER_ENVIRONMENT=$DOCKER_ENVIRONMENT"\n\
+echo "Configuring system resources..."\n\
+# Try to increase shared memory if possible\n\
+if [ -d "/dev/shm" ]; then\n\
+  mount -t tmpfs -o remount,size=2G,noatime tmpfs /dev/shm || echo "Could not increase shared memory"\n\
+fi\n\
+# Report system memory\n\
+free -h || echo "free command not available"\n\
 echo "Starting Xvfb..."\n\
 Xvfb :99 -screen 0 1920x1080x24 -ac &\n\
 sleep 2\n\
+export DISPLAY=:99\n\
 echo "Verifying Playwright browsers:"\n\
 if [ -d "/root/.cache/ms-playwright" ]; then\n\
   echo "Playwright browser cache directory exists:"\n\
@@ -104,9 +115,17 @@ else\n\
   echo "Installing Playwright browsers now:"\n\
   playwright install --with-deps firefox\n\
 fi\n\
-echo "Starting Recent Tweets Extractor API..."\n\
+echo "Starting Recent Tweets Extractor API with resource limits..."\n\
+# Run with increased memory limits\n\
 python docker_extract_recent.py' > /app/start_recent.sh && \
     chmod +x /app/start_recent.sh
+
+# Add environment variable for Firefox stability in Docker
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+ENV MOZ_HEADLESS=1
+ENV MOZ_DISABLE_GMP_SANDBOX=1
+ENV MOZ_DISABLE_CONTENT_SANDBOX=1
+ENV MOZ_DISABLE_RDD_SANDBOX=1
 
 # Command to run the application
 CMD ["/app/start_recent.sh"] 
