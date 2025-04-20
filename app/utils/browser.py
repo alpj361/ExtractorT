@@ -12,8 +12,6 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.service import Service
 import shutil
 import subprocess
-import nest_asyncio
-import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -291,27 +289,3 @@ def scroll_page(driver, num_scrolls=10, scroll_delay=2):
         logger.debug(f"Scroll {i+1}/{num_scrolls}")
         # Add some randomness to the delay
         time.sleep(scroll_delay + random.uniform(0, 1))
-
-def run_async(coro):
-    """
-    Run an asynchronous coroutine from synchronous code.
-    
-    Args:
-        coro: Coroutine to run
-        
-    Returns:
-        Result of the coroutine
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:  # No running loop
-        loop = None
-
-    if loop and loop.is_running():
-        # If there's a running loop, use it
-        return asyncio.ensure_future(coro)
-    else:
-        # Otherwise, create a new loop
-        return asyncio.run(coro)
-
-nest_asyncio.apply()
