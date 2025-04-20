@@ -1,0 +1,24 @@
+FROM python:3.11-alpine
+
+# Crear directorio de la aplicación
+WORKDIR /app
+
+# Copiar solo los archivos necesarios
+COPY minimal_railway_extractor.py .
+
+# Exponer puerto
+ENV PORT=8000
+EXPOSE ${PORT}
+
+# Configurar variables de entorno
+ENV PYTHONUNBUFFERED=1
+ENV RAILWAY_ENVIRONMENT=1
+
+# Usar script de inicio minimalista
+RUN echo '#!/bin/sh' > start.sh && \
+    echo 'echo "Starting Ultra Minimal Twitter Extractor on port $PORT"' >> start.sh && \
+    echo 'python3 minimal_railway_extractor.py' >> start.sh && \
+    chmod +x start.sh
+
+# Comando para ejecutar la aplicación
+CMD ["./start.sh"] 
