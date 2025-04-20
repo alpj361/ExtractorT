@@ -1,0 +1,48 @@
+FROM --platform=linux/amd64 python:3.11-slim
+
+# Create app directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir httpx beautifulsoup4
+
+# Copy application code
+COPY . .
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DOCKER_ENVIRONMENT=1
+ENV RAILWAY_ENVIRONMENT=1
+ENV PORT=8000
+
+# Expose port
+EXPOSE ${PORT}
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+echo "Starting Railway optimized Twitter extractor..."\n\
+echo "Environment: RAILWAY=$RAILWAY_ENVIRONMENT, DOCKER=$DOCKER_ENVIRONMENT"\n\
+\n\
+# Report system resources\n\
+echo "System resources:"\n\
+if command -v free &> /dev/null; then\n\
+  free -h\n\
+else\n\
+  echo "Memory info command not available"\n\
+fi\n\
+\n\
+python docker_extract_recent_railway.py' > /app/start_railway.sh && \
+    chmod +x /app/start_railway.sh
+
+# Command to run the application
+CMD ["/app/start_railway.sh"] 
