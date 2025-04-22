@@ -1,19 +1,20 @@
-version: "3.9"
+version: '3.9'
+
 services:
-  extractor_api:
+  api:
     build: .
-    container_name: extractor_api
-    ports:
-      - "8000:8000"
+    container_name: fastapi_service
     expose:
-      - "8000"
-  
-  nginx_proxy:
+      - 8000
+    restart: always
+
+  nginx:
     image: nginx:latest
     container_name: nginx_proxy
     ports:
-      - "8080:80"
+      - "80:80"
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - extractor_api
+      - api
+    restart: always
