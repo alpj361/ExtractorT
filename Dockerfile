@@ -170,5 +170,7 @@ echo "Starting application server..."\n\
 uvicorn app.main:app --host 0.0.0.0 --port ${PORT}' > /app/start.sh && \
     chmod +x /app/start.sh
 
+
+
 # Command to run the application
 CMD ["python", "docker_extract_recent.py"]
