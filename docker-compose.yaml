@@ -16,5 +16,5 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - api
+      - extractor_api
     restart: always
