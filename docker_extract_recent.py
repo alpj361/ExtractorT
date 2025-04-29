@@ -1126,5 +1126,461 @@ def main():
         logger.info(f"Iniciando servidor API en el puerto {port}")
         uvicorn.run(app, host="0.0.0.0", port=port)
 
+@app.get("/extract_hashtag/{hashtag}", response_class=JSONResponse)
+async def extract_hashtag_endpoint(
+    hashtag: str,
+    max_tweets: int = Query(20, ge=1, le=100, description="Máximo número de tweets a extraer"),
+    min_tweets: int = Query(10, ge=1, le=50, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos")
+):
+    """Extrae tweets recientes para un hashtag específico."""
+    global extraction_in_progress
+    
+    # Normalizar el hashtag (eliminar # si se incluyó)
+    hashtag = hashtag.strip().replace("#", "")
+    
+    # Evitar múltiples extracciones simultáneas
+    if extraction_in_progress:
+        return {"status": "error", "message": "Ya hay una extracción en progreso. Intente más tarde."}
+    
+    extraction_in_progress = True
+    try:
+        # Intentar extraer tweets
+        tweets = await extract_hashtag_tweets(hashtag, max_tweets, min_tweets, max_scrolls)
+        
+        if not tweets:
+            return {"status": "error", "message": "No se pudieron extraer tweets."}
+        
+        # Añadir al caché
+        recent_extractions[f"hashtag_{hashtag}"] = tweets
+        
+        # Devolver resultados
+        return {
+            "status": "success",
+            "hashtag": hashtag,
+            "tweet_count": len(tweets),
+            "tweets": tweets
+        }
+    except Exception as e:
+        logger.error(f"Error al extraer tweets para hashtag: {e}")
+        return {"status": "error", "message": f"Error al extraer tweets para hashtag: {str(e)}"}
+    finally:
+        extraction_in_progress = False
+
+@app.post("/extract_hashtag_recent", response_model=ExtractionResponse)
+async def api_extract_hashtag_recent(request: ExtractionRequest):
+    try:
+        # Normalizar el hashtag (eliminar # si se incluyó)
+        hashtag = request.username.strip().replace("#", "")
+        
+        # Extraer tweets recientes por hashtag
+        tweets = await extract_hashtag_tweets(
+            hashtag, 
+            request.max_tweets, 
+            request.min_tweets,
+            request.max_scrolls
+        )
+        
+        if not tweets:
+            return {
+                "status": "error",
+                "message": "No se pudieron extraer tweets recientes para el hashtag",
+                "tweets": [],
+                "count": 0
+            }
+        
+        # Calcular el rango de fechas
+        date_range = {}
+        try:
+            formatted_dates = []
+            for t in tweets:
+                try:
+                    timestamp = t['timestamp']
+                    if 'Z' in timestamp:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    else:
+                        dt = pd.to_datetime(timestamp).to_pydatetime()
+                    formatted_dates.append(dt)
+                except Exception as e:
+                    logger.warning(f"Error al formatear fecha: {e}")
+            
+            if formatted_dates:
+                first_date = min(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                last_date = max(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                date_range = {
+                    "first_date": first_date,
+                    "last_date": last_date
+                }
+        except Exception as e:
+            logger.error(f"Error al procesar fechas: {e}")
+        
+        return {
+            "status": "success",
+            "message": f"Se extrajeron {len(tweets)} tweets recientes para el hashtag #{hashtag}",
+            "tweets": tweets,
+            "count": len(tweets),
+            "date_range": date_range
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en API de hashtags: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al extraer tweets para hashtag: {str(e)}"
+        )
+
+async def extract_hashtag_tweets(hashtag, max_tweets=20, min_tweets=10, max_scrolls=10):
+    """
+    Extrae tweets recientes para un hashtag específico utilizando la URL de búsqueda con filtro "live"
+    """
+    logger.info(f"Iniciando extracción de tweets para hashtag #{hashtag}")
+    logger.info(f"Parámetros: max_tweets={max_tweets}, min_tweets={min_tweets}, max_scrolls={max_scrolls}")
+    
+    # Verificar y asegurar cookies válidas
+    for attempt in range(MAX_RETRIES):
+        try:
+            if not await ensure_valid_storage():
+                logger.error("No se pudieron obtener cookies válidas, abortando extracción")
+                return []
+            break
+        except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                if attempt < MAX_RETRIES - 1:
+                    logger.warning(f"El navegador se cerró inesperadamente durante la validación de cookies (intento {attempt+1}/{MAX_RETRIES}). Reintentando...")
+                    await asyncio.sleep(2)  # Esperar un poco antes de reintentar
+                else:
+                    logger.error(f"Error persistente al validar cookies después de {MAX_RETRIES} intentos: {e}")
+                    return []
+            else:
+                logger.error(f"Error al validar cookies: {e}")
+                return []
+    
+    # Obtener fechas para filtros dinámicos
+    now = datetime.utcnow()
+    today = now.strftime('%Y-%m-%d')
+    yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    last_week = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+    last_month = (now - timedelta(days=30)).strftime('%Y-%m-%d')
+    
+    logger.info(f"Fechas para filtros - Hora actual UTC: {now.isoformat()}, Hoy: {today}, Último mes: {last_month}")
+    
+    tweets = []
+    
+    # Configurar opciones específicas para Docker/Railway
+    firefox_args = []
+    launch_options = {
+        "headless": DOCKER_ENVIRONMENT or RAILWAY_ENVIRONMENT,
+    }
+    
+    if DOCKER_ENVIRONMENT or RAILWAY_ENVIRONMENT:
+        firefox_args.extend([
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-setuid-sandbox",
+        ])
+        launch_options["firefox_user_prefs"] = {
+            "network.cookie.cookieBehavior": 0,
+            "privacy.trackingprotection.enabled": False
+        }
+        
+    launch_options["args"] = firefox_args
+    
+    # Control de reintentos para problemas de navegador
+    for browser_attempt in range(MAX_RETRIES):
+        try:
+            async with async_playwright() as p:
+                # Usar Firefox para consistencia
+                browser = await p.firefox.launch(**launch_options)
+                
+                try:
+                    context_options = {"storage_state": STORAGE_FILE}
+                    context = await browser.new_context(**context_options)
+                    page = await context.new_page()
+                    
+                    # Aumentar los tiempos de espera por defecto para evitar errores de timeout
+                    page.set_default_timeout(30000)  # 30 segundos en entornos Docker/Railway
+                    
+                    # Lista de URLs a intentar, optimizada para tweets de hashtags
+                    search_urls = [
+                        f"https://x.com/search?q=%23{hashtag}&f=live",
+                        f"https://x.com/hashtag/{hashtag}?f=live", 
+                        f"https://x.com/search?q=%23{hashtag}%20since%3A{last_week}&f=live",
+                        f"https://x.com/search?q=%23{hashtag}%20since%3A{last_month}&f=live"
+                    ]
+                    
+                    all_tweets = []
+                    login_error = False
+                    
+                    for url_index, search_url in enumerate(search_urls):
+                        if len(all_tweets) >= max_tweets * 1.5:  # Si ya tenemos 1.5x el número deseado, podemos parar
+                            logger.info(f"Ya se recolectaron suficientes tweets ({len(all_tweets)}), deteniendo búsqueda")
+                            break
+                        
+                        try:
+                            logger.info(f"Intento #{url_index+1}: Navegando a búsqueda de hashtag: {search_url}")
+                            
+                            # Manejar errores de navegación con reintentos
+                            for nav_attempt in range(3):  # Máximo 3 intentos para navegar
+                                try:
+                                    await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                                    break
+                                except Exception as nav_error:
+                                    if "Target page, context or browser has been closed" in str(nav_error):
+                                        raise nav_error  # Si el navegador está cerrado, salir del bucle principal
+                                    if nav_attempt < 2:  # Si no es el último intento
+                                        logger.warning(f"Error al navegar (intento {nav_attempt+1}/3): {nav_error}. Reintentando...")
+                                        await asyncio.sleep(2)
+                                    else:
+                                        logger.error(f"Error persistente al navegar después de 3 intentos: {nav_error}")
+                                        continue  # Intentar con la siguiente URL
+                            
+                            await asyncio.sleep(5)  # Esperar a que cargue la página
+                            
+                            # Verificar URL actual
+                            current_url = page.url
+                            logger.info(f"URL actual: {current_url}")
+                            
+                            # Verificar si fuimos redirigidos a login
+                            if "/login" in current_url or "/i/flow/login" in current_url:
+                                logger.warning("Redirigido a login, la sesión expiró. Iniciando login automático...")
+                                
+                                screenshot_path = "/tmp/login_redirect_hashtag.png" if DOCKER_ENVIRONMENT else f"login_redirect_hashtag_{hashtag}_{url_index}.png"
+                                await page.screenshot(path=screenshot_path)
+                                
+                                # Cerrar la sesión actual y navegador
+                                await browser.close()
+                                
+                                # Realizar un nuevo login
+                                login_success = await perform_login()
+                                if not login_success:
+                                    logger.error("No se pudo iniciar sesión de nuevo. Abortando extracción.")
+                                    login_error = True
+                                    break
+                                
+                                # Reiniciar el navegador con las nuevas cookies
+                                browser = await p.firefox.launch(**launch_options)
+                                context = await browser.new_context(storage_state=STORAGE_FILE)
+                                page = await context.new_page()
+                                page.set_default_timeout(15000)
+                                
+                                # Volver a intentar la URL actual
+                                logger.info(f"Reintentando URL después de renovar sesión: {search_url}")
+                                await page.goto(search_url, wait_until="domcontentloaded")
+                                await asyncio.sleep(5)
+                                
+                                # Verificar URL de nuevo
+                                current_url = page.url
+                                if "/login" in current_url or "/i/flow/login" in current_url:
+                                    logger.error("Seguimos siendo redirigidos a login a pesar del nuevo inicio de sesión.")
+                                    login_error = True
+                                    break
+                            
+                            # Forzar la pestaña "Latest" si hay pestañas disponibles y si estamos en una búsqueda
+                            if "search" in current_url and "f=live" not in current_url:
+                                latest_tab = await page.query_selector('a[href*="f=live"], a:has-text("Latest"), a:has-text("Recientes")')
+                                if latest_tab:
+                                    logger.info("Seleccionando pestaña 'Latest/Recientes'")
+                                    await latest_tab.click()
+                                    await asyncio.sleep(3)
+                            
+                            # Scroll inicial para asegurar carga completa
+                            logger.info("Realizando desplazamiento inicial para cargar la página completamente")
+                            for i in range(3):
+                                await page.evaluate('window.scrollBy(0, 1000)')
+                                await asyncio.sleep(1)
+                            
+                            # Capturar pantalla para diagnóstico (solo en entorno no Docker)
+                            if not DOCKER_ENVIRONMENT:
+                                screenshot_path = f"page_initial_hashtag_{hashtag}_{url_index}.png"
+                                await page.screenshot(path=screenshot_path)
+                                logger.info(f"Captura inicial guardada: {screenshot_path}")
+                            
+                            # Scroll AGRESIVO para cargar más tweets
+                            logger.info(f"Iniciando desplazamiento AGRESIVO para cargar tweets (máx {max_scrolls})")
+                            
+                            tweet_count_previous = 0
+                            no_new_tweets_count = 0
+                            
+                            for scroll_idx in range(max_scrolls):
+                                logger.info(f"Desplazamiento {scroll_idx+1}/{max_scrolls}")
+                                
+                                # Desplazar hacia abajo con movimiento agresivo
+                                await page.evaluate('window.scrollBy(0, 2500)')
+                                await asyncio.sleep(1)
+                                
+                                # Verificar cada 2 scrolls o en el último
+                                if scroll_idx % 2 == 0 or scroll_idx == max_scrolls - 1:
+                                    # Contar tweets después de desplazar
+                                    tweet_count = await _count_tweets(page)
+                                    logger.info(f"Tweets encontrados tras desplazamiento {scroll_idx+1}: {tweet_count}")
+                                    
+                                    # Detectar si ya no aparecen nuevos tweets
+                                    if tweet_count == tweet_count_previous:
+                                        no_new_tweets_count += 1
+                                        if no_new_tweets_count >= 3:  # Si 3 veces seguidas no hay nuevos tweets
+                                            logger.info(f"No se detectan nuevos tweets después de {no_new_tweets_count} intentos, deteniendo scrolls")
+                                            break
+                                    else:
+                                        no_new_tweets_count = 0
+                                        tweet_count_previous = tweet_count
+                                    
+                                    # Tomar screenshots ocasionalmente (solo en entorno no Docker)
+                                    if not DOCKER_ENVIRONMENT and scroll_idx % 4 == 0:
+                                        screenshot_path = f"page_scroll_hashtag_{hashtag}_{url_index}_{scroll_idx}.png"
+                                        await page.screenshot(path=screenshot_path)
+                                        logger.info(f"Captura guardada: {screenshot_path}")
+                                    
+                                    # Si encontramos suficientes tweets, podemos parar
+                                    if tweet_count >= max_tweets * 3:  # Extraer el triple para tener margen de filtrado
+                                        logger.info(f"Se encontraron suficientes tweets ({tweet_count}), deteniendo desplazamiento")
+                                        break
+                            
+                            # Extraer datos de tweets para esta URL
+                            logger.info(f"Extrayendo datos de tweets para hashtag desde URL #{url_index+1}...")
+                            current_tweets = await _extract_tweets_data(page, max_tweets*2)  # Extraer el doble para tener margen
+                            
+                            if current_tweets and len(current_tweets) > 0:
+                                logger.info(f"Se encontraron {len(current_tweets)} tweets para hashtag en URL #{url_index+1}")
+                                
+                                # Agregar a la lista general, evitando duplicados
+                                existing_ids = {t['tweet_id'] for t in all_tweets}
+                                new_tweets = [t for t in current_tweets if t['tweet_id'] not in existing_ids]
+                                
+                                if new_tweets:
+                                    logger.info(f"Añadiendo {len(new_tweets)} tweets no duplicados a la lista general")
+                                    all_tweets.extend(new_tweets)
+                            else:
+                                logger.warning(f"No se encontraron tweets para hashtag en URL #{url_index+1}")
+                        
+                        except Exception as url_error:
+                            if "Target page, context or browser has been closed" in str(url_error):
+                                raise url_error  # Propagar el error para reiniciar todo el proceso
+                            logger.error(f"Error procesando URL #{url_index+1} para hashtag: {url_error}")
+                            continue  # Intentar con la siguiente URL
+                    
+                    # Verificar si hubo un error de login que no se pudo resolver
+                    if login_error:
+                        logger.error("La extracción del hashtag se detuvo debido a un problema persistente con la sesión.")
+                        return []
+                    
+                    # Guardar el HTML de la página final para diagnóstico en entorno Docker
+                    if DOCKER_ENVIRONMENT:
+                        html_content = await page.content()
+                        with open(f"/tmp/final_page_content_hashtag_{hashtag}.html", "w", encoding="utf-8") as f:
+                            f.write(html_content)
+                        logger.info(f"HTML de la página final guardado en /tmp/final_page_content_hashtag_{hashtag}.html")
+                    
+                    # Ordenar tweets por timestamp (más recientes primero)
+                    if all_tweets:
+                        # Primero filtrar tweets sin contenido (eliminar analytics, photo, etc.)
+                        filtered_tweets = [t for t in all_tweets if not (
+                            "photo" in t['tweet_id'] or 
+                            "analytics" in t['tweet_id'] or 
+                            t['text'].startswith("[Contenido no disponible") or
+                            len(t['text']) < 10  # Eliminar tweets demasiado cortos
+                        )]
+                        
+                        logger.info(f"Filtrados {len(all_tweets) - len(filtered_tweets)} tweets sin contenido real")
+                        
+                        # Verificar que los tweets contengan el hashtag (caso insensitivo)
+                        hashtag_tweets = []
+                        for t in filtered_tweets:
+                            text_lower = t['text'].lower()
+                            if f"#{hashtag.lower()}" in text_lower or f" {hashtag.lower()} " in text_lower:
+                                hashtag_tweets.append(t)
+                            
+                        logger.info(f"Encontrados {len(hashtag_tweets)} tweets con el hashtag #{hashtag}")
+                        
+                        # Ordenar por fecha, más recientes primero
+                        hashtag_tweets.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                        logger.info(f"Total de tweets extraídos para hashtag, filtrados y ordenados: {len(hashtag_tweets)}")
+                        
+                        # Mostrar info de los tweets más recientes para debug
+                        if len(hashtag_tweets) > 0:
+                            try:
+                                most_recent = hashtag_tweets[0]
+                                date_str = datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                                logger.info(f"Tweet más reciente para #{hashtag}: {date_str} - {most_recent['text'][:50]}...")
+                            except Exception as e:
+                                logger.error(f"Error al mostrar información del tweet más reciente: {e}")
+                        
+                        # Asignar a la variable de retorno, limitando al máximo
+                        tweets = hashtag_tweets[:max_tweets]
+                    else:
+                        logger.warning(f"No se encontraron tweets para el hashtag #{hashtag} en ningún intento")
+                    
+                except Exception as e:
+                    if "Target page, context or browser has been closed" in str(e):
+                        raise e  # Propagar el error para reiniciar todo el proceso
+                    logger.error(f"Error durante la extracción del hashtag: {e}")
+                    logger.error(traceback.format_exc())
+                    
+                    # Capturar pantalla en caso de error
+                    try:
+                        screenshot_path = "/tmp/error_hashtag.png" if DOCKER_ENVIRONMENT else f"error_hashtag_{hashtag}.png"
+                        await page.screenshot(path=screenshot_path)
+                        logger.info(f"Captura de error guardada: {screenshot_path}")
+                    except Exception as screenshot_error:
+                        logger.warning(f"No se pudo capturar pantalla de error: {screenshot_error}")
+                
+                finally:
+                    try:
+                        await browser.close()
+                        logger.info("Navegador cerrado correctamente")
+                    except Exception as close_error:
+                        logger.warning(f"Error al cerrar el navegador: {close_error}")
+            
+            # Si llegamos aquí sin excepciones, salir del bucle de reintentos
+            break
+            
+        except Exception as browser_error:
+            if "Target page, context or browser has been closed" in str(browser_error):
+                if browser_attempt < MAX_RETRIES - 1:
+                    logger.warning(f"El navegador se cerró inesperadamente (intento {browser_attempt+1}/{MAX_RETRIES}). Reintentando...")
+                    await asyncio.sleep(3)  # Esperar un poco más entre reintentos
+                else:
+                    logger.error(f"Error persistente con el navegador después de {MAX_RETRIES} intentos: {browser_error}")
+            else:
+                logger.error(f"Error fatal durante la extracción del hashtag: {browser_error}")
+                logger.error(traceback.format_exc())
+                break
+    
+    total_tweets = len(tweets)
+    logger.info(f"Total de tweets extraídos para hashtag #{hashtag}: {total_tweets}")
+    
+    if total_tweets < min_tweets:
+        logger.warning(f"Se extrajeron menos tweets ({total_tweets}) que el mínimo requerido ({min_tweets})")
+    
+    return tweets
+
+# Función para salvar resultados de hashtag a CSV (útil para ejecución local)
+def save_hashtag_results_to_csv(tweets, hashtag):
+    """
+    Guarda los tweets extraídos de un hashtag en un archivo CSV
+    """
+    if not tweets:
+        logger.warning("No hay tweets para guardar")
+        return None
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"tweets_hashtag_{hashtag}_{timestamp}.csv"
+    
+    df = pd.DataFrame(tweets)
+    
+    # Añadir numeración
+    df['tweet_num'] = range(1, len(df) + 1)
+    
+    # Reorganizar columnas
+    columns = ['tweet_num', 'tweet_id', 'username', 'text', 'timestamp']
+    df = df[columns]
+    
+    # Guardar a CSV
+    df.to_csv(filename, index=False)
+    logger.info(f"Tweets del hashtag #{hashtag} guardados en {filename}")
+    
+    return filename
+
 if __name__ == "__main__":
     main() 
