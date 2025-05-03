@@ -36,6 +36,7 @@ from bs4 import BeautifulSoup
 import unicodedata
 import difflib
 import re
+import time
 
 # Configurar logging
 logging.basicConfig(
@@ -43,6 +44,37 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Importar módulos para extracción de métricas y comentarios vía GraphQL
+try:
+    from twitter_graphql import TwitterGraphQLClient
+    from tweet_metrics import fetch_via_graphql, parse_tweet_id_from_url
+    GRAPHQL_AVAILABLE = True
+    logger.info("Cliente GraphQL disponible para métricas y comentarios")
+except ImportError:
+    GRAPHQL_AVAILABLE = False
+    logger.warning("Cliente GraphQL no disponible. Se usará el método de Playwright.")
+
+# Nuevas importaciones para Selenium
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+    # Importar webdriver_manager condicionalmente (puede fallar en algunos entornos)
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        WEBDRIVER_MANAGER_AVAILABLE = True
+    except ImportError:
+        WEBDRIVER_MANAGER_AVAILABLE = False
+    
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    logger.warning("Selenium is not available. Some features will be disabled.")
 
 # Credenciales para login automático (pueden ser sobreescritas por variables de entorno)
 TWITTER_USERNAME = os.environ.get("TWITTER_USERNAME", "StandPd2007")
@@ -1159,7 +1191,11 @@ def main():
     # En modo local, ejecutar como script
     if not (DOCKER_ENVIRONMENT or RAILWAY_ENVIRONMENT):
         try:
-            asyncio.run(main_async())
+            # Ejecutar como API local para pruebas
+            port = int(os.environ.get("PORT", 8000))
+            logger.info(f"Iniciando servidor API local en el puerto {port}")
+            import uvicorn
+            uvicorn.run(app, host="0.0.0.0", port=port)
         except KeyboardInterrupt:
             logger.info("Proceso interrumpido por el usuario")
             print("\nProceso interrumpido por el usuario")
@@ -2487,6 +2523,800 @@ def get_fallback_trends(location_key="guatemala"):
     
     # Obtener tendencias para la ubicación solicitada o usar las de Guatemala como default
     return fallback_trends.get(location_key, fallback_trends["guatemala"])
+
+# Función para convertir texto de estadísticas (como "1.2K") a números enteros
+def parse_count_text(count_text):
+    """
+    Convierte texto de estadísticas como "1.2K", "5,6K", "2M" a números enteros.
+    """
+    if not count_text:
+        return 0
+    
+    # Eliminar espacios y caracteres no alfanuméricos excepto puntos y comas
+    count_text = count_text.strip()
+    # Si no hay texto, retornar 0
+    if not count_text or count_text == "":
+        return 0
+        
+    try:
+        # Reemplazar comas por puntos para normalizar formato
+        normalized = count_text.replace(',', '.').lower()
+        
+        if 'k' in normalized:
+            # Ejemplo: "1.2K" -> 1200
+            value = float(normalized.replace('k', ''))
+            return int(value * 1000)
+        elif 'm' in normalized:
+            # Ejemplo: "3.4M" -> 3400000
+            value = float(normalized.replace('m', ''))
+            return int(value * 1000000)
+        else:
+            # Intentar convertir directamente a entero
+            return int(float(normalized))
+    except (ValueError, TypeError):
+        logger.warning(f"No se pudo convertir '{count_text}' a número")
+        return 0
+
+class HashtagDetailExtractor:
+    """
+    Clase para extraer detalles avanzados de tweets con un hashtag específico, 
+    incluyendo métricas (likes, replies, retweets, views) y comentarios.
+    """
+    
+    def __init__(self, hashtag, max_tweets=20, min_tweets=10, max_scrolls=10, 
+                include_comments=True, comment_limit=20):
+        """
+        Inicializa el extractor con los parámetros necesarios.
+        
+        Args:
+            hashtag (str): Hashtag a buscar (sin #)
+            max_tweets (int): Número máximo de tweets a extraer
+            min_tweets (int): Número mínimo de tweets a extraer
+            max_scrolls (int): Número máximo de scrolls en la página
+            include_comments (bool): Si se incluyen comentarios en los resultados
+            comment_limit (int): Número máximo de comentarios por tweet
+        """
+        self.hashtag = hashtag.strip().replace("#", "")
+        self.max_tweets = max_tweets
+        self.min_tweets = min_tweets
+        self.max_scrolls = max_scrolls
+        self.include_comments = include_comments
+        self.comment_limit = comment_limit
+        self.logger = logging.getLogger(__name__)
+        
+        # Verificar si Selenium está disponible
+        self.use_selenium = SELENIUM_AVAILABLE
+        
+    async def get_base_tweets(self):
+        """
+        Obtiene los tweets base utilizando la función extract_hashtag_tweets existente.
+        
+        Returns:
+            List[Dict]: Lista de tweets con información básica
+        """
+        self.logger.info(f"Obteniendo tweets base para #{self.hashtag}")
+        return await extract_hashtag_tweets(
+            self.hashtag, 
+            self.max_tweets, 
+            self.min_tweets, 
+            self.max_scrolls
+        )
+    
+    async def parse_counts(self, page):
+        """
+        Extrae las métricas de un tweet (likes, replies, reposts, views).
+        
+        Args:
+            page: Objeto página de Playwright
+            
+        Returns:
+            Dict: Diccionario con los contadores
+        """
+        counts = {
+            "likes": 0,
+            "replies": 0,
+            "reposts": 0,
+            "views": 0
+        }
+        
+        try:
+            # Extraer likes
+            try:
+                likes_el = await page.query_selector('div[data-testid="like"] span span')
+                if likes_el:
+                    likes_text = await likes_el.inner_text()
+                    counts["likes"] = parse_count_text(likes_text)
+            except Exception as e:
+                self.logger.warning(f"Error extrayendo likes: {e}")
+            
+            # Extraer replies
+            try:
+                replies_el = await page.query_selector('div[data-testid="reply"] span span')
+                if replies_el:
+                    replies_text = await replies_el.inner_text()
+                    counts["replies"] = parse_count_text(replies_text)
+            except Exception as e:
+                self.logger.warning(f"Error extrayendo replies: {e}")
+            
+            # Extraer reposts (retweets)
+            try:
+                reposts_el = await page.query_selector('div[data-testid="retweet"] span span')
+                if reposts_el:
+                    reposts_text = await reposts_el.inner_text()
+                    counts["reposts"] = parse_count_text(reposts_text)
+            except Exception as e:
+                self.logger.warning(f"Error extrayendo reposts: {e}")
+            
+            # Extraer views
+            try:
+                views_el = await page.query_selector('div[data-testid="viewCount"] span span')
+                if views_el:
+                    views_text = await views_el.inner_text()
+                    counts["views"] = parse_count_text(views_text)
+            except Exception as e:
+                self.logger.warning(f"Error extrayendo views: {e}")
+                
+        except Exception as e:
+            self.logger.error(f"Error al extraer contadores: {e}")
+            
+        return counts
+    
+    async def parse_comments(self, page, limit=20):
+        """
+        Extrae los comentarios de un tweet.
+        
+        Args:
+            page: Objeto página de Playwright
+            limit: Número máximo de comentarios a extraer
+            
+        Returns:
+            List[Dict]: Lista de comentarios con usuario, texto y likes
+        """
+        comments = []
+        
+        try:
+            # Buscar todos los tweets en la página, excepto el primero (que es el original)
+            comment_elements = await page.query_selector_all('article[data-testid="tweet"]')
+            
+            # Excluir el primer elemento que normalmente es el tweet original
+            if len(comment_elements) > 1:
+                comment_elements = comment_elements[1:]
+            
+            # Limitar el número de comentarios
+            comment_elements = comment_elements[:min(limit, len(comment_elements))]
+            
+            for i, comment_el in enumerate(comment_elements):
+                try:
+                    # Extraer usuario
+                    username = "Desconocido"
+                    user_el = await comment_el.query_selector('div[data-testid="User-Name"] a span')
+                    if user_el:
+                        username = await user_el.inner_text()
+                    else:
+                        # Intentar con selector alternativo
+                        user_el = await comment_el.query_selector('a[href*="/status/"] span')
+                        if user_el:
+                            username = await user_el.inner_text()
+                    
+                    # Extraer texto del comentario
+                    text = ""
+                    text_el = await comment_el.query_selector('div[data-testid="tweetText"]')
+                    if text_el:
+                        text = await text_el.inner_text()
+                    else:
+                        # Método alternativo similar a _extract_tweets_data
+                        text = await comment_el.evaluate('node => { const textElements = node.querySelectorAll("div[lang], div[dir=\'auto\']"); let text = ""; for (const el of textElements) { text += el.textContent + " "; } return text.replace(/\\s+/g, " ").trim(); }')
+                    
+                    # Extraer likes del comentario
+                    likes = 0
+                    likes_el = await comment_el.query_selector('div[data-testid="like"] span span')
+                    if likes_el:
+                        likes_text = await likes_el.inner_text()
+                        likes = parse_count_text(likes_text)
+                    
+                    # Añadir a la lista si tiene información útil
+                    if text and len(text) > 0:
+                        comments.append({
+                            "user": username,
+                            "text": text,
+                            "likes": likes
+                        })
+                        
+                except Exception as comment_error:
+                    self.logger.warning(f"Error extrayendo comentario #{i+1}: {comment_error}")
+                    continue
+                    
+        except Exception as e:
+            self.logger.error(f"Error al extraer comentarios: {e}")
+            
+        return comments
+    
+    async def enrich_tweet(self, tweet, browser):
+        """
+        Enriquece un tweet con métricas y comentarios utilizando primero la API GraphQL
+        y como fallback el método de navegación web con Playwright.
+        
+        Args:
+            tweet (dict): Tweet base con información básica
+            browser: Instancia del navegador de Playwright
+            
+        Returns:
+            dict: Tweet enriquecido con métricas y comentarios
+        """
+        enriched_tweet = tweet.copy()
+        tweet_id = tweet.get('tweet_id')
+        
+        # Si no hay ID, devolver el tweet sin enriquecer
+        if not tweet_id:
+            self.logger.warning(f"No se pudo extraer ID del tweet: {tweet.get('text', '')[:30]}...")
+            enriched_tweet.update({
+                "likes": 0,
+                "replies": 0,
+                "reposts": 0,
+                "views": 0,
+                "comments": []
+            })
+            return enriched_tweet
+        
+        # 1) Intentar obtener datos via GraphQL primero (más rápido y preciso)
+        if GRAPHQL_AVAILABLE:
+            try:
+                self.logger.info(f"Intentando obtener métricas y comentarios via GraphQL para tweet {tweet_id}")
+                graphql_data = await fetch_via_graphql(tweet_id, self.comment_limit)
+                
+                if graphql_data.get("success", False):
+                    self.logger.info(f"Extracción via GraphQL exitosa para tweet {tweet_id}")
+                    # Actualizar tweet con datos de GraphQL
+                    enriched_tweet.update({
+                        "likes": graphql_data.get("likes", 0),
+                        "replies": graphql_data.get("replies", 0),
+                        "reposts": graphql_data.get("reposts", 0),
+                        "views": graphql_data.get("views", 0),
+                        "comments": graphql_data.get("comments", [])
+                    })
+                    self.logger.info(f"Métricas via GraphQL: {graphql_data.get('likes')} likes, {graphql_data.get('reposts')} reposts, {len(graphql_data.get('comments', []))} comentarios")
+                    return enriched_tweet
+                else:
+                    self.logger.warning(f"Extracción via GraphQL falló para tweet {tweet_id}, usando fallback con Playwright")
+            except Exception as e:
+                self.logger.error(f"Error en extracción GraphQL para tweet {tweet_id}: {e}")
+                self.logger.info("Usando fallback con Playwright")
+        else:
+            self.logger.info("Cliente GraphQL no disponible. Usando método Playwright.")
+        
+        # 2) Fallback: Método original con Playwright
+        try:
+            # Crear nueva página
+            page = await browser.new_page()
+            page.set_default_timeout(30000)  # Aumentar timeout a 30 segundos
+            
+            # Construir URL del tweet
+            tweet_url = f"https://x.com/i/status/{tweet_id}"
+            self.logger.info(f"Navegando a URL del tweet: {tweet_url}")
+            
+            # Navegar a la URL del tweet
+            try:
+                await page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3)  # Aumentar espera para cargar contenido dinámico
+            except Exception as nav_error:
+                self.logger.error(f"Error al navegar a {tweet_url}: {nav_error}")
+                enriched_tweet.update({
+                    "likes": 0,
+                    "replies": 0,
+                    "reposts": 0,
+                    "views": 0,
+                    "comments": []
+                })
+                await page.close()
+                return enriched_tweet
+            
+            # Hacer scroll para asegurar que los contadores estén visibles
+            await page.evaluate('window.scrollBy(0, 300)')
+            await asyncio.sleep(1)
+            
+            # Mejorado: Hacer hover sobre los elementos para forzar que aparezcan
+            try:
+                # Hover sobre elementos de interacción para forzar que aparezcan contadores
+                hover_selectors = [
+                    'div[data-testid="like"]',
+                    'div[data-testid="reply"]',
+                    'div[data-testid="retweet"]'
+                ]
+                for selector in hover_selectors:
+                    element = await page.query_selector(selector)
+                    if element:
+                        await element.hover()
+                        await asyncio.sleep(0.5)
+            except Exception as hover_error:
+                self.logger.warning(f"Error en hover: {hover_error}")
+            
+            # Extraer contadores con múltiples selectores
+            counts = {
+                "likes": 0,
+                "replies": 0,
+                "reposts": 0,
+                "views": 0
+            }
+            
+            # Extraer likes
+            try:
+                likes_selectors = [
+                    'div[data-testid="like"] span span',
+                    '[data-testid="like-count"]',
+                    'div[role="button"][aria-label*="Like"] span span'
+                ]
+                for selector in likes_selectors:
+                    likes_el = await page.query_selector(selector)
+                    if likes_el:
+                        likes_text = await likes_el.inner_text()
+                        likes_value = parse_count_text(likes_text)
+                        if likes_value > 0:
+                            counts["likes"] = likes_value
+                            self.logger.info(f"Likes extraídos: {likes_text} → {counts['likes']}")
+                            break
+            except Exception as e:
+                self.logger.warning(f"Error al extraer likes: {e}")
+            
+            # Extraer replies
+            try:
+                replies_selectors = [
+                    'div[data-testid="reply"] span span',
+                    '[data-testid="reply-count"]',
+                    'div[role="button"][aria-label*="Reply"] span span'
+                ]
+                for selector in replies_selectors:
+                    replies_el = await page.query_selector(selector)
+                    if replies_el:
+                        replies_text = await replies_el.inner_text()
+                        replies_value = parse_count_text(replies_text)
+                        if replies_value > 0:
+                            counts["replies"] = replies_value
+                            self.logger.info(f"Replies extraídos: {replies_text} → {counts['replies']}")
+                            break
+            except Exception as e:
+                self.logger.warning(f"Error al extraer replies: {e}")
+            
+            # Extraer reposts (retweets)
+            try:
+                reposts_selectors = [
+                    'div[data-testid="retweet"] span span',
+                    '[data-testid="retweet-count"]',
+                    'div[role="button"][aria-label*="Retweet"] span span'
+                ]
+                for selector in reposts_selectors:
+                    reposts_el = await page.query_selector(selector)
+                    if reposts_el:
+                        reposts_text = await reposts_el.inner_text()
+                        reposts_value = parse_count_text(reposts_text)
+                        if reposts_value > 0:
+                            counts["reposts"] = reposts_value
+                            self.logger.info(f"Reposts extraídos: {reposts_text} → {counts['reposts']}")
+                            break
+            except Exception as e:
+                self.logger.warning(f"Error al extraer reposts: {e}")
+            
+            # Extraer views
+            try:
+                views_selectors = [
+                    'div[data-testid="viewCount"] span span',
+                    'a[aria-label*="view"]',
+                    'span[data-testid="app-text-transition-container"]'
+                ]
+                for selector in views_selectors:
+                    views_el = await page.query_selector(selector)
+                    if views_el:
+                        views_text = await views_el.inner_text()
+                        views_value = parse_count_text(views_text)
+                        if views_value > 0:
+                            counts["views"] = views_value
+                            self.logger.info(f"Views extraídos: {views_text} → {counts['views']}")
+                            break
+            except Exception as e:
+                self.logger.warning(f"Error al extraer views: {e}")
+            
+            # Si las métricas siguen en cero, intentar método alternativo con JavaScript
+            if all(value == 0 for value in counts.values()):
+                try:
+                    self.logger.info("Intentando extracción de métricas con JavaScript...")
+                    metrics_js = await page.evaluate("""() => {
+                        const metrics = {likes: 0, replies: 0, reposts: 0, views: 0};
+                        
+                        // Buscar elementos con números
+                        const elements = document.querySelectorAll('span');
+                        const numberElements = Array.from(elements).filter(el => {
+                            const text = el.textContent.trim();
+                            return /^[\\d,.]+[KMBkmb]?$/.test(text); // Buscar números como "1.2K", "3M", etc.
+                        });
+                        
+                        // Si encontramos 3-4 elementos con números, asumimos que son métricas
+                        if (numberElements.length >= 3 && numberElements.length <= 5) {
+                            // Los primeros 3 elementos suelen ser replies, reposts, likes en ese orden
+                            if (numberElements.length >= 3) {
+                                metrics.replies = numberElements[0].textContent.trim();
+                                metrics.reposts = numberElements[1].textContent.trim();
+                                metrics.likes = numberElements[2].textContent.trim();
+                            }
+                            
+                            // Si hay un cuarto elemento, suele ser views
+                            if (numberElements.length >= 4) {
+                                metrics.views = numberElements[3].textContent.trim();
+                            }
+                        }
+                        
+                        return metrics;
+                    }""")
+                    
+                    self.logger.info(f"Métricas extraídas con JS: {metrics_js}")
+                    
+                    # Actualizar contadores si se encontraron valores
+                    if metrics_js:
+                        for key in counts:
+                            js_value = metrics_js.get(key, "0")
+                            parsed_value = parse_count_text(js_value)
+                            if parsed_value > 0:
+                                counts[key] = parsed_value
+                except Exception as js_error:
+                    self.logger.warning(f"Error en extracción con JavaScript: {js_error}")
+            
+            # Añadir contadores al tweet
+            enriched_tweet.update(counts)
+            
+            # Extraer comentarios si se solicitan
+            if self.include_comments:
+                self.logger.info(f"Extrayendo comentarios (máx {self.comment_limit})...")
+                comments = []
+                
+                try:
+                    # Hacer scroll para cargar más comentarios
+                    for scroll in range(5):
+                        await page.evaluate('window.scrollBy(0, 1000)')
+                        await asyncio.sleep(0.7)
+                    
+                    # Intentar hacer clic en "Show more replies" si está presente
+                    try:
+                        show_more_button = await page.query_selector('div[role="button"]:has-text("Show more replies")')
+                        if show_more_button:
+                            self.logger.info("Haciendo clic en 'Show more replies'")
+                            await show_more_button.click()
+                            await asyncio.sleep(2)
+                            # Scroll adicional después de mostrar más respuestas
+                            await page.evaluate('window.scrollBy(0, 1000)')
+                            await asyncio.sleep(1)
+                    except Exception as e:
+                        self.logger.warning(f"Error al hacer clic en 'Show more replies': {e}")
+                    
+                    # Buscar comentarios (excluir el primero que es el tweet original)
+                    comment_elements = await page.query_selector_all('article[data-testid="tweet"]')
+                    
+                    # Excluir el primer elemento (tweet original)
+                    if len(comment_elements) > 1:
+                        comment_elements = comment_elements[1:]
+                        self.logger.info(f"Se encontraron {len(comment_elements)} elementos potenciales de comentarios")
+                        
+                        # Limitar número de comentarios
+                        comment_elements = comment_elements[:min(self.comment_limit, len(comment_elements))]
+                        
+                        for i, comment_el in enumerate(comment_elements):
+                            try:
+                                # Extraer usuario del comentario (intentar diferentes selectores)
+                                username = "Usuario"
+                                user_selectors = [
+                                    'div[data-testid="User-Name"] a span',
+                                    'div[data-testid="User-Name"] span',
+                                    'a[role="link"] div[dir="auto"] span'
+                                ]
+                                
+                                for selector in user_selectors:
+                                    user_el = await comment_el.query_selector(selector)
+                                    if user_el:
+                                        username_text = await user_el.inner_text()
+                                        if username_text.strip():
+                                            username = username_text.strip()
+                                            break
+                                
+                                # Extraer texto del comentario (intentar diferentes selectores)
+                                text = ""
+                                text_selectors = [
+                                    'div[data-testid="tweetText"]',
+                                    'div[lang]',
+                                    'div[dir="auto"]'
+                                ]
+                                
+                                for selector in text_selectors:
+                                    text_el = await comment_el.query_selector(selector)
+                                    if text_el:
+                                        text = await text_el.inner_text()
+                                        if text.strip():
+                                            break
+                                
+                                # Extraer likes del comentario
+                                likes = 0
+                                likes_el = await comment_el.query_selector('div[data-testid="like"] span span')
+                                if likes_el:
+                                    likes_text = await likes_el.inner_text()
+                                    likes = parse_count_text(likes_text)
+                                
+                                # Solo agregar si tiene texto
+                                if text and len(text) > 5:  # Filtrar comentarios muy cortos
+                                    comments.append({
+                                        "user": username,
+                                        "text": text,
+                                        "likes": likes
+                                    })
+                                    self.logger.info(f"Comentario #{len(comments)} extraído: {username} - {text[:30]}...")
+                                    
+                                    # Si ya tenemos suficientes comentarios, detener
+                                    if len(comments) >= self.comment_limit:
+                                        break
+                            except Exception as comment_error:
+                                self.logger.warning(f"Error extrayendo comentario #{i+1}: {comment_error}")
+                    
+                    self.logger.info(f"Total de comentarios extraídos: {len(comments)}")
+                    enriched_tweet["comments"] = comments
+                except Exception as comments_error:
+                    self.logger.error(f"Error al extraer comentarios: {comments_error}")
+                    enriched_tweet["comments"] = []
+            else:
+                enriched_tweet["comments"] = []
+                
+            # Cerrar página
+            await page.close()
+            
+        except Exception as e:
+            self.logger.error(f"Error enriqueciendo tweet {tweet_id} con Playwright: {e}")
+            # Añadir contadores en cero y lista vacía de comentarios en caso de error
+            enriched_tweet.update({
+                "likes": 0,
+                "replies": 0,
+                "reposts": 0,
+                "views": 0,
+                "comments": []
+            })
+            
+        return enriched_tweet
+    
+    async def extract(self):
+        """
+        Orquesta todo el proceso de extracción:
+        1. Obtiene tweets base
+        2. Para cada tweet, extrae métricas y comentarios
+        3. Devuelve la lista completa de tweets enriquecidos
+        
+        Returns:
+            Dict: Respuesta con hashtag y lista de tweets enriquecidos
+        """
+        self.logger.info(f"Iniciando extracción detallada para #{self.hashtag}")
+        
+        # Obtener tweets base
+        base_tweets = await self.get_base_tweets()
+        
+        if not base_tweets:
+            self.logger.warning(f"No se encontraron tweets para #{self.hashtag}")
+            return {
+                "hashtag": f"#{self.hashtag}",
+                "tweet_count": 0,
+                "tweets": []
+            }
+        
+        # Limitar el número de tweets a procesar
+        base_tweets = base_tweets[:self.max_tweets]
+        self.logger.info(f"Procesando {len(base_tweets)} tweets")
+        
+        # Configurar opciones específicas para el navegador
+        firefox_args = []
+        launch_options = {
+            "headless": IS_HEADLESS,  # Usar variable global IS_HEADLESS
+        }
+        
+        if DOCKER_ENVIRONMENT or RAILWAY_ENVIRONMENT:
+            firefox_args.extend([
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-setuid-sandbox",
+            ])
+            launch_options["firefox_user_prefs"] = {
+                "network.cookie.cookieBehavior": 0,
+                "privacy.trackingprotection.enabled": False
+            }
+        
+        self.logger.info(f"Lanzando navegador para detalles con headless={IS_HEADLESS}")
+        launch_options["args"] = firefox_args
+        
+        enriched_tweets = []
+        
+        # Control de reintentos para problemas de navegador
+        for browser_attempt in range(MAX_RETRIES):
+            try:
+                async with async_playwright() as p:
+                    # Usar Firefox para consistencia
+                    browser = await p.firefox.launch(**launch_options)
+                    
+                    try:
+                        # Configurar contexto con sesión existente
+                        context_options = {"storage_state": STORAGE_FILE}
+                        context = await browser.new_context(**context_options)
+                        
+                        # Procesar cada tweet de forma secuencial
+                        for i, tweet in enumerate(base_tweets):
+                            self.logger.info(f"Procesando tweet {i+1}/{len(base_tweets)} con Playwright")
+                            
+                            # Obtener tweet enriquecido
+                            enriched_tweet = await self.enrich_tweet(tweet, context)
+                            
+                            # Añadir a la lista
+                            enriched_tweets.append(enriched_tweet)
+                            
+                            # Pequeña pausa entre tweets para evitar rate limiting
+                            if i < len(base_tweets) - 1:
+                                await asyncio.sleep(1)
+                        
+                    except Exception as e:
+                        if "Target page, context or browser has been closed" in str(e):
+                            raise e
+                        self.logger.error(f"Error durante el enriquecimiento: {e}")
+                        self.logger.error(traceback.format_exc())
+                    
+                    finally:
+                        # Cerrar navegador
+                        await browser.close()
+                        self.logger.info("Navegador cerrado correctamente")
+                
+                # Si llegamos aquí sin excepciones, salir del bucle de reintentos
+                break
+                
+            except Exception as browser_error:
+                if "Target page, context or browser has been closed" in str(browser_error):
+                    if browser_attempt < MAX_RETRIES - 1:
+                        self.logger.warning(f"El navegador se cerró inesperadamente (intento {browser_attempt+1}/{MAX_RETRIES}). Reintentando...")
+                        await asyncio.sleep(3)
+                    else:
+                        self.logger.error(f"Error persistente con el navegador después de {MAX_RETRIES} intentos: {browser_error}")
+                else:
+                    self.logger.error(f"Error fatal durante la extracción detallada: {browser_error}")
+                    self.logger.error(traceback.format_exc())
+                    break
+        
+        # Si no hay tweets enriquecidos pero sí hay tweets base, usar los tweets base con contadores en cero
+        if not enriched_tweets and base_tweets:
+            self.logger.warning("No se pudieron enriquecer los tweets. Usando tweets base con contadores en cero.")
+            for tweet in base_tweets:
+                enriched_tweet = tweet.copy()
+                enriched_tweet.update({
+                    "likes": 0,
+                    "replies": 0,
+                    "reposts": 0,
+                    "views": 0,
+                    "comments": []
+                })
+                enriched_tweets.append(enriched_tweet)
+        
+        # Construir respuesta
+        response = {
+            "hashtag": f"#{self.hashtag}",
+            "tweet_count": len(enriched_tweets),
+            "tweets": enriched_tweets
+        }
+        
+        self.logger.info(f"Extracción detallada completada para #{self.hashtag}: {len(enriched_tweets)} tweets")
+        return response
+
+# Crear nuevo modelo de datos para el endpoint
+class HashtagDetailRequest(BaseModel):
+    max_tweets: int = 20
+    min_tweets: int = 10
+    max_scrolls: int = 10
+    include_comments: bool = True
+    comment_limit: int = Query(20, ge=5, le=40)
+
+class HashtagDetailResponse(BaseModel):
+    status: str
+    message: str
+    hashtag: str
+    tweet_count: int = 0
+    tweets: Optional[List[Dict[str, Any]]] = None
+
+# Endpoint para extraer detalles de tweets por hashtag
+@app.get("/extract/hashtag/details/{hashtag}", response_model=HashtagDetailResponse)
+async def extract_hashtag_details_endpoint(
+    hashtag: str,
+    max_tweets: int = Query(20, ge=1, le=100, description="Máximo número de tweets a extraer"),
+    min_tweets: int = Query(10, ge=1, le=50, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos"),
+    include_comments: bool = Query(True, description="Incluir comentarios en los resultados"),
+    comment_limit: int = Query(20, ge=5, le=40, description="Máximo número de comentarios por tweet")
+):
+    """
+    Extrae tweets con un hashtag específico incluyendo métricas detalladas y opcionalmente comentarios.
+    """
+    global extraction_in_progress
+    
+    # Normalizar el hashtag (eliminar # si se incluyó)
+    hashtag = hashtag.strip().replace("#", "")
+    
+    # Evitar múltiples extracciones simultáneas
+    if extraction_in_progress:
+        return {
+            "status": "error", 
+            "message": "Ya hay una extracción en progreso. Intente más tarde.",
+            "hashtag": f"#{hashtag}",
+            "tweet_count": 0,
+            "tweets": []
+        }
+    
+    extraction_in_progress = True
+    try:
+        # Crear instancia del extractor
+        extractor = HashtagDetailExtractor(
+            hashtag=hashtag,
+            max_tweets=max_tweets,
+            min_tweets=min_tweets,
+            max_scrolls=max_scrolls,
+            include_comments=include_comments,
+            comment_limit=comment_limit
+        )
+        
+        # Ejecutar extracción
+        result = await extractor.extract()
+        
+        # Verificar si se encontraron tweets
+        if not result["tweets"]:
+            return {
+                "status": "error",
+                "message": f"No se pudieron extraer tweets para el hashtag #{hashtag}",
+                "hashtag": f"#{hashtag}",
+                "tweet_count": 0,
+                "tweets": []
+            }
+        
+        # Construir respuesta exitosa
+        return {
+            "status": "success",
+            "message": f"Se extrajeron {len(result['tweets'])} tweets con detalles para #{hashtag}",
+            "hashtag": result["hashtag"],
+            "tweet_count": result["tweet_count"],
+            "tweets": result["tweets"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en extracción detallada para #{hashtag}: {e}")
+        logger.error(traceback.format_exc())
+        return {
+            "status": "error",
+            "message": f"Error al extraer tweets detallados: {str(e)}",
+            "hashtag": f"#{hashtag}",
+            "tweet_count": 0,
+            "tweets": []
+        }
+    finally:
+        extraction_in_progress = False
+
+# Función para salvar resultados de hashtag a CSV (útil para ejecución local)
+def save_hashtag_results_to_csv(tweets, hashtag):
+    """
+    Guarda los tweets extraídos de un hashtag en un archivo CSV
+    """
+    if not tweets:
+        logger.warning("No hay tweets para guardar")
+        return None
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"tweets_hashtag_{hashtag}_{timestamp}.csv"
+    
+    df = pd.DataFrame(tweets)
+    
+    # Añadir numeración
+    df['tweet_num'] = range(1, len(df) + 1)
+    
+    # Reorganizar columnas
+    columns = ['tweet_num', 'tweet_id', 'username', 'text', 'timestamp']
+    df = df[columns]
+    
+    # Guardar a CSV
+    df.to_csv(filename, index=False)
+    logger.info(f"Tweets del hashtag #{hashtag} guardados en {filename}")
+    
+    return filename
 
 if __name__ == "__main__":
     main() 
