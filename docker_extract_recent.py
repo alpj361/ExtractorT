@@ -21,7 +21,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -37,6 +37,8 @@ import unicodedata
 import difflib
 import re
 import time
+import uuid
+from enum import Enum
 
 # Configurar logging
 logging.basicConfig(
@@ -118,6 +120,254 @@ login_in_progress = False
 extraction_in_progress = False
 recent_extractions = {}  # Cache de extracciones recientes
 
+# Sistema de gestión de tareas asíncronas
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class TaskType(str, Enum):
+    USER_EXTRACTION = "user_extraction"
+    HASHTAG_EXTRACTION = "hashtag_extraction"
+    HASHTAG_DETAILS = "hashtag_details"
+
+class TaskInfo(BaseModel):
+    task_id: str
+    type: TaskType
+    status: TaskStatus
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    params: Dict[str, Any]
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    progress: Optional[float] = None
+
+# Diccionario para almacenar tareas
+tasks = {}
+
+# Función para crear un nuevo ID de tarea
+def generate_task_id():
+    return str(uuid.uuid4())
+
+# Función para registrar una nueva tarea
+def register_task(task_type: TaskType, params: Dict[str, Any]) -> str:
+    task_id = generate_task_id()
+    tasks[task_id] = TaskInfo(
+        task_id=task_id,
+        type=task_type,
+        status=TaskStatus.PENDING,
+        created_at=datetime.now().isoformat(),
+        params=params,
+        progress=0.0
+    )
+    return task_id
+
+# Función para actualizar el estado de una tarea
+def update_task_status(task_id: str, status: TaskStatus, result=None, error=None, progress=None):
+    if task_id not in tasks:
+        logger.warning(f"Intento de actualizar tarea inexistente: {task_id}")
+        return False
+    
+    task = tasks[task_id]
+    task.status = status
+    
+    if status == TaskStatus.RUNNING and task.started_at is None:
+        task.started_at = datetime.now().isoformat()
+    
+    if status == TaskStatus.COMPLETED or status == TaskStatus.FAILED:
+        task.completed_at = datetime.now().isoformat()
+    
+    if result is not None:
+        task.result = result
+    
+    if error is not None:
+        task.error = error
+    
+    if progress is not None:
+        task.progress = progress
+    
+    return True
+
+# Función para ejecutar una tarea en segundo plano
+async def run_background_task(task_id: str):
+    if task_id not in tasks:
+        logger.error(f"Tarea no encontrada: {task_id}")
+        return
+    
+    task = tasks[task_id]
+    update_task_status(task_id, TaskStatus.RUNNING)
+    
+    try:
+        if task.type == TaskType.USER_EXTRACTION:
+            # Extraer tweets de usuario
+            username = task.params.get("username")
+            max_tweets = task.params.get("max_tweets", 20)
+            min_tweets = task.params.get("min_tweets", 10)
+            max_scrolls = task.params.get("max_scrolls", 10)
+            
+            tweets = await extract_recent_tweets(
+                username, max_tweets, min_tweets, max_scrolls
+            )
+            
+            # Procesar el resultado igual que en api_extract_recent
+            if not tweets:
+                update_task_status(
+                    task_id, 
+                    TaskStatus.FAILED, 
+                    error="No se pudieron extraer tweets recientes"
+                )
+                return
+            
+            # Calcular el rango de fechas
+            date_range = {}
+            try:
+                formatted_dates = []
+                for t in tweets:
+                    try:
+                        timestamp = t['timestamp']
+                        if 'Z' in timestamp:
+                            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        else:
+                            dt = pd.to_datetime(timestamp).to_pydatetime()
+                        formatted_dates.append(dt)
+                    except Exception as e:
+                        logger.warning(f"Error al formatear fecha: {e}")
+                
+                if formatted_dates:
+                    first_date = min(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                    last_date = max(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                    date_range = {
+                        "first_date": first_date,
+                        "last_date": last_date
+                    }
+            except Exception as e:
+                logger.error(f"Error al procesar fechas: {e}")
+            
+            # Actualizar tarea como completada con resultado
+            result = {
+                "status": "success",
+                "message": f"Se extrajeron {len(tweets)} tweets recientes",
+                "tweets": tweets,
+                "count": len(tweets),
+                "date_range": date_range
+            }
+            update_task_status(task_id, TaskStatus.COMPLETED, result=result)
+            
+        elif task.type == TaskType.HASHTAG_EXTRACTION:
+            # Extraer tweets con hashtag
+            hashtag = task.params.get("hashtag")
+            max_tweets = task.params.get("max_tweets", 20)
+            min_tweets = task.params.get("min_tweets", 10)
+            max_scrolls = task.params.get("max_scrolls", 10)
+            lang = task.params.get("lang", "es")
+            search_mode = task.params.get("search_mode", "top")
+            
+            tweets = await extract_hashtag_tweets(
+                hashtag, max_tweets, min_tweets, max_scrolls, lang, search_mode
+            )
+            
+            # Procesar el resultado similar a api_extract_hashtag_recent
+            if not tweets:
+                update_task_status(
+                    task_id, 
+                    TaskStatus.FAILED, 
+                    error=f"No se pudieron extraer tweets para el hashtag #{hashtag}"
+                )
+                return
+            
+            # Calcular el rango de fechas
+            date_range = {}
+            try:
+                formatted_dates = []
+                for t in tweets:
+                    try:
+                        timestamp = t['timestamp']
+                        if 'Z' in timestamp:
+                            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        else:
+                            dt = pd.to_datetime(timestamp).to_pydatetime()
+                        formatted_dates.append(dt)
+                    except Exception as e:
+                        logger.warning(f"Error al formatear fecha: {e}")
+                
+                if formatted_dates:
+                    first_date = min(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                    last_date = max(formatted_dates).strftime('%Y-%m-%d %H:%M')
+                    date_range = {
+                        "first_date": first_date,
+                        "last_date": last_date
+                    }
+            except Exception as e:
+                logger.error(f"Error al procesar fechas: {e}")
+            
+            # Actualizar tarea como completada con resultado
+            result = {
+                "status": "success",
+                "message": f"Se extrajeron {len(tweets)} tweets recientes para el hashtag #{hashtag}",
+                "tweets": tweets,
+                "count": len(tweets),
+                "date_range": date_range,
+                "hashtag": f"#{hashtag}"
+            }
+            update_task_status(task_id, TaskStatus.COMPLETED, result=result)
+            
+        elif task.type == TaskType.HASHTAG_DETAILS:
+            # Extracción detallada de hashtag
+            hashtag = task.params.get("hashtag")
+            max_tweets = task.params.get("max_tweets", 10)
+            min_tweets = task.params.get("min_tweets", 5)
+            max_scrolls = task.params.get("max_scrolls", 5)
+            include_comments = task.params.get("include_comments", True)
+            comment_limit = task.params.get("comment_limit", 5)
+            time_limit = task.params.get("time_limit", 250)
+            lang = task.params.get("lang", "es")
+            min_likes = task.params.get("min_likes", 10)
+            search_mode = task.params.get("search_mode", "top")
+            
+            # Crear extractor y actualizar progreso periódicamente
+            extractor = HashtagDetailExtractor(
+                hashtag=hashtag,
+                max_tweets=max_tweets,
+                min_tweets=min_tweets,
+                max_scrolls=max_scrolls,
+                include_comments=include_comments,
+                comment_limit=comment_limit,
+                time_limit_seconds=time_limit,
+                lang=lang,
+                min_likes=min_likes,
+                search_mode=search_mode
+            )
+            
+            # Ejecutar extracción
+            result = await extractor.extract()
+            
+            # Verificar si se encontraron tweets
+            if not result["tweets"]:
+                update_task_status(
+                    task_id, 
+                    TaskStatus.FAILED, 
+                    error=f"No se pudieron extraer tweets para el hashtag #{hashtag}"
+                )
+                return
+            
+            # Construir respuesta exitosa
+            success_result = {
+                "status": "success",
+                "message": f"Se extrajeron {len(result['tweets'])} tweets con detalles para #{hashtag}",
+                "hashtag": result["hashtag"],
+                "tweet_count": result["tweet_count"],
+                "tweets": result["tweets"],
+                "execution_time_seconds": result.get("execution_time_seconds", 0)
+            }
+            update_task_status(task_id, TaskStatus.COMPLETED, result=success_result)
+        
+    except Exception as e:
+        logger.error(f"Error en tarea {task_id}: {e}")
+        logger.error(traceback.format_exc())
+        update_task_status(task_id, TaskStatus.FAILED, error=str(e))
+
 # Modelos de datos para la API
 class ExtractionRequest(BaseModel):
     username: str
@@ -131,6 +381,22 @@ class ExtractionResponse(BaseModel):
     tweets: Optional[List[Dict[str, Any]]] = None
     count: int = 0
     date_range: Optional[Dict[str, str]] = None
+
+class TaskResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    progress: Optional[float] = None
+    message: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
 
 # Punto de entrada API 
 @app.get("/", response_class=JSONResponse)
@@ -3730,6 +3996,237 @@ def save_hashtag_results_to_csv(tweets, hashtag):
     logger.info(f"Tweets del hashtag #{hashtag} guardados en {filename}")
     
     return filename
+
+# Endpoint para consultar el estado de una tarea
+@app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+async def get_task_status(task_id: str):
+    """Consulta el estado de una tarea en progreso"""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Tarea {task_id} no encontrada")
+    
+    task = tasks[task_id]
+    message = "Tarea completada exitosamente"
+    
+    if task.status == TaskStatus.PENDING:
+        message = "Tarea pendiente de iniciar"
+    elif task.status == TaskStatus.RUNNING:
+        message = "Tarea en ejecución"
+    elif task.status == TaskStatus.FAILED:
+        message = f"Error en la tarea: {task.error}"
+    
+    return TaskStatusResponse(
+        task_id=task.task_id,
+        status=task.status,
+        progress=task.progress,
+        message=message,
+        result=task.result,
+        error=task.error,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        completed_at=task.completed_at
+    )
+
+# Endpoint para listar tareas
+@app.get("/tasks", response_class=JSONResponse)
+async def list_tasks(
+    limit: int = Query(10, ge=1, le=100, description="Número máximo de tareas a mostrar"),
+    status: Optional[str] = Query(None, description="Filtrar por estado (pending, running, completed, failed)")
+):
+    """Lista las tareas registradas en el sistema"""
+    filtered_tasks = []
+    
+    for task_id, task in tasks.items():
+        if status is None or task.status == status:
+            filtered_tasks.append({
+                "task_id": task.task_id,
+                "type": task.type,
+                "status": task.status,
+                "created_at": task.created_at,
+                "started_at": task.started_at,
+                "completed_at": task.completed_at
+            })
+    
+    # Ordenar por fecha de creación (más recientes primero)
+    filtered_tasks.sort(key=lambda x: x["created_at"], reverse=True)
+    
+    # Limitar resultados
+    filtered_tasks = filtered_tasks[:limit]
+    
+    return {
+        "total_tasks": len(filtered_tasks),
+        "tasks": filtered_tasks
+    }
+
+# Versión asíncrona del endpoint extract_endpoint
+@app.get("/async/extract/{username}", response_model=TaskResponse)
+async def async_extract_endpoint(
+    username: str,
+    max_tweets: int = Query(20, ge=1, le=100, description="Máximo número de tweets a extraer"),
+    min_tweets: int = Query(10, ge=1, le=50, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos"),
+    background_tasks: BackgroundTasks = None
+):
+    """Inicia una extracción asíncrona de tweets para un usuario específico."""
+    username = username.replace("@", "")  # Eliminar @ si se incluyó
+    
+    # Crear parámetros de tarea
+    params = {
+        "username": username,
+        "max_tweets": max_tweets,
+        "min_tweets": min_tweets,
+        "max_scrolls": max_scrolls
+    }
+    
+    # Registrar tarea
+    task_id = register_task(TaskType.USER_EXTRACTION, params)
+    logger.info(f"Nueva tarea creada: {task_id} para extracción de usuario @{username}")
+    
+    # Iniciar tarea en segundo plano
+    background_tasks.add_task(run_background_task, task_id)
+    
+    return TaskResponse(
+        task_id=task_id,
+        status="accepted",
+        message=f"Extracción de tweets para @{username} iniciada. Consulta el estado con /tasks/{task_id}"
+    )
+
+# Versión asíncrona del endpoint extract_hashtag_endpoint
+@app.get("/async/extract_hashtag/{hashtag}", response_model=TaskResponse)
+async def async_extract_hashtag_endpoint(
+    hashtag: str,
+    max_tweets: int = Query(20, ge=1, le=100, description="Máximo número de tweets a extraer"),
+    min_tweets: int = Query(10, ge=1, le=50, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos"),
+    lang: str = Query("es", description="Idioma de los tweets a extraer (es, en, pt, etc.)"),
+    search_mode: str = Query("top", description="Modo de búsqueda: 'top' para tweets populares, 'live' para tiempo real"),
+    background_tasks: BackgroundTasks = None
+):
+    """Inicia una extracción asíncrona de tweets para un hashtag específico."""
+    # Normalizar el hashtag (eliminar # si se incluyó)
+    hashtag = hashtag.strip().replace("#", "")
+    
+    # Validar search_mode
+    if search_mode not in ["top", "live"]:
+        search_mode = "top"  # Valor por defecto si no es válido
+    
+    # Crear parámetros de tarea
+    params = {
+        "hashtag": hashtag,
+        "max_tweets": max_tweets,
+        "min_tweets": min_tweets,
+        "max_scrolls": max_scrolls,
+        "lang": lang,
+        "search_mode": search_mode
+    }
+    
+    # Registrar tarea
+    task_id = register_task(TaskType.HASHTAG_EXTRACTION, params)
+    logger.info(f"Nueva tarea creada: {task_id} para extracción de hashtag #{hashtag}")
+    
+    # Iniciar tarea en segundo plano
+    background_tasks.add_task(run_background_task, task_id)
+    
+    return TaskResponse(
+        task_id=task_id,
+        status="accepted",
+        message=f"Extracción de tweets para #{hashtag} iniciada. Consulta el estado con /tasks/{task_id}"
+    )
+
+# Versión asíncrona del endpoint extract_hashtag_details_endpoint
+@app.get("/async/extract/hashtag/details/{hashtag}", response_model=TaskResponse)
+async def async_extract_hashtag_details_endpoint(
+    hashtag: str,
+    max_tweets: int = Query(10, ge=1, le=50, description="Máximo número de tweets a extraer"), 
+    min_tweets: int = Query(5, ge=1, le=20, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(5, ge=1, le=20, description="Máximo número de desplazamientos"),
+    include_comments: bool = Query(True, description="Incluir comentarios en los resultados"),
+    comment_limit: int = Query(5, ge=1, le=20, description="Máximo número de comentarios por tweet"),
+    time_limit: int = Query(250, ge=30, le=290, description="Límite de tiempo en segundos"),
+    lang: str = Query("es", description="Idioma de los tweets a extraer (es, en, pt, etc.)"),
+    min_likes: int = Query(10, ge=0, le=1000, description="Número mínimo de likes que debe tener un tweet para ser incluido"),
+    search_mode: str = Query("top", description="Modo de búsqueda: 'top' para tweets populares, 'live' para tiempo real"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Inicia una extracción asíncrona de tweets con detalles para un hashtag específico.
+    
+    Parámetros:
+    - hashtag: Hashtag a buscar (con o sin #)
+    - max_tweets: Número máximo de tweets a extraer
+    - min_tweets: Número mínimo de tweets a extraer
+    - max_scrolls: Número máximo de desplazamientos en la página
+    - include_comments: Si se incluyen comentarios en los resultados
+    - comment_limit: Número máximo de comentarios por tweet
+    - time_limit: Límite de tiempo en segundos para la extracción
+    - lang: Idioma de los tweets a extraer (es, en, pt, etc.)
+    - min_likes: Número mínimo de likes que debe tener un tweet para ser incluido
+    - search_mode: Modo de búsqueda: 'top' para tweets populares, 'live' para tiempo real
+    """
+    # Normalizar el hashtag (eliminar # si se incluyó)
+    hashtag = hashtag.strip().replace("#", "")
+    
+    # Validar search_mode
+    if search_mode not in ["top", "live"]:
+        search_mode = "top"  # Valor por defecto si no es válido
+    
+    # Crear parámetros de tarea
+    params = {
+        "hashtag": hashtag,
+        "max_tweets": max_tweets,
+        "min_tweets": min_tweets,
+        "max_scrolls": max_scrolls,
+        "include_comments": include_comments,
+        "comment_limit": comment_limit,
+        "time_limit": time_limit,
+        "lang": lang,
+        "min_likes": min_likes,
+        "search_mode": search_mode
+    }
+    
+    # Registrar tarea
+    task_id = register_task(TaskType.HASHTAG_DETAILS, params)
+    logger.info(f"Nueva tarea creada: {task_id} para extracción detallada de hashtag #{hashtag}")
+    
+    # Iniciar tarea en segundo plano
+    background_tasks.add_task(run_background_task, task_id)
+    
+    return TaskResponse(
+        task_id=task_id,
+        status="accepted",
+        message=f"Extracción detallada de tweets para #{hashtag} iniciada. Consulta el estado con /tasks/{task_id}"
+    )
+
+# Eliminar tareas antiguas periódicamente (mantener el diccionario de tareas limpio)
+@app.on_event("startup")
+async def setup_task_cleanup():
+    """Configura limpieza periódica de tareas antiguas"""
+    asyncio.create_task(clean_old_tasks())
+
+async def clean_old_tasks():
+    """Elimina tareas completadas/fallidas con más de 1 día de antigüedad"""
+    while True:
+        try:
+            now = datetime.now()
+            to_remove = []
+            
+            for task_id, task in tasks.items():
+                if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                    completed_at = datetime.fromisoformat(task.completed_at) if task.completed_at else None
+                    if completed_at and (now - completed_at).total_seconds() > 86400:  # 1 día
+                        to_remove.append(task_id)
+            
+            # Eliminar tareas antiguas
+            for task_id in to_remove:
+                del tasks[task_id]
+                
+            if to_remove:
+                logger.info(f"Limpieza de tareas: {len(to_remove)} tareas antiguas eliminadas")
+                
+        except Exception as e:
+            logger.error(f"Error en limpieza de tareas: {e}")
+            
+        # Ejecutar cada 6 horas
+        await asyncio.sleep(6 * 60 * 60)
 
 if __name__ == "__main__":
     main() 
