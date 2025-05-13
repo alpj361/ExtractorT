@@ -39,6 +39,13 @@ import re
 import time
 import uuid
 from enum import Enum
+import numpy as np
+import psutil
+import io
+import csv
+import glob
+import base64
+import aiohttp
 
 # Configurar logging
 logging.basicConfig(
@@ -178,6 +185,45 @@ def update_task_status(task_id: str, status: TaskStatus, result=None, error=None
     
     if status == TaskStatus.COMPLETED or status == TaskStatus.FAILED:
         task.completed_at = datetime.now().isoformat()
+        
+        # Enviar notificación al webhook si está habilitado
+        if WEBHOOK_ENABLED:
+            # Crear datos para enviar al webhook
+            webhook_data = {
+                "type": str(task.type),  # Convertir a string para garantizar la serialización
+                "params": {k: str(v) if isinstance(v, (datetime, Enum)) else v 
+                          for k, v in task.params.items() if not isinstance(v, complex)},
+                "execution_time": 0
+            }
+            
+            if task.started_at:
+                start_time = datetime.fromisoformat(task.started_at)
+                end_time = datetime.fromisoformat(task.completed_at)
+                webhook_data["execution_time"] = (end_time - start_time).total_seconds()
+            
+            if result is not None:
+                # Simplificar result, evitando datos complejos como los tweets completos
+                webhook_data["result_summary"] = {
+                    "status": result.get("status", ""),
+                    "message": result.get("message", ""),
+                    "count": result.get("count", 0) or len(result.get("tweets", [])),
+                }
+                
+                # Incluir un pequeño resumen si hay tweets
+                if "tweets" in result and result["tweets"]:
+                    tweet_count = len(result["tweets"])
+                    webhook_data["result_summary"]["tweet_count"] = tweet_count
+                    webhook_data["result_summary"]["first_tweet_id"] = result["tweets"][0].get("tweet_id", "") if tweet_count > 0 else ""
+            
+            if error is not None:
+                webhook_data["error"] = str(error)
+            
+            # Enviar notificación al webhook de forma asíncrona
+            asyncio.create_task(notify_webhook(
+                task_id=task_id,
+                status=str(status),  # Convertir a string para garantizar la serialización
+                data=webhook_data
+            ))
     
     if result is not None:
         task.result = result
@@ -397,6 +443,16 @@ class TaskStatusResponse(BaseModel):
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+
+class WebhookConfigRequest(BaseModel):
+    enabled: bool
+    url: Optional[str] = None
+
+class WebhookConfigResponse(BaseModel):
+    status: str
+    message: str
+    enabled: bool
+    url: str
 
 # Punto de entrada API 
 @app.get("/", response_class=JSONResponse)
@@ -4227,6 +4283,97 @@ async def clean_old_tasks():
             
         # Ejecutar cada 6 horas
         await asyncio.sleep(6 * 60 * 60)
+
+# Configuración del webhook
+WEBHOOK_URL = "https://hook.us2.make.com/aodohfjatyshb1tomkxdhdg6my5megu7"
+WEBHOOK_ENABLED = True  # Variable para habilitar/deshabilitar notificaciones
+
+# Función para enviar notificaciones al webhook
+async def notify_webhook(task_id: str, status: str, data: Dict[str, Any]):
+    """
+    Envía una notificación al webhook cuando una tarea cambia de estado
+    
+    Args:
+        task_id: ID de la tarea
+        status: Estado de la tarea (completada, fallida)
+        data: Datos adicionales para enviar
+    """
+    try:
+        payload = {
+            "task_id": task_id,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "data": data
+        }
+        
+        # Simplificar el payload para evitar datos demasiado complejos
+        simplified_payload = {
+            "task_id": task_id,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "type": data.get("type", ""),
+            "execution_time": data.get("execution_time", 0),
+            "message": data.get("result_summary", {}).get("message", "") if "result_summary" in data else "",
+            "count": data.get("result_summary", {}).get("count", 0) if "result_summary" in data else 0,
+            "error": data.get("error", "")
+        }
+        
+        logger.info(f"Enviando notificación al webhook para tarea {task_id}")
+        logger.debug(f"Payload: {simplified_payload}")
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            async with session.post(WEBHOOK_URL, json=simplified_payload, headers=headers) as response:
+                response_text = await response.text()
+                if response.status == 200:
+                    logger.info(f"Notificación enviada al webhook para tarea {task_id}")
+                else:
+                    logger.warning(f"Error al enviar notificación al webhook para tarea {task_id}: {response.status}")
+                    logger.warning(f"Respuesta: {response_text}")
+                    
+    except Exception as e:
+        logger.error(f"Error al enviar notificación al webhook: {e}")
+        logger.error(traceback.format_exc())
+
+# Endpoint para configurar el webhook
+@app.post("/config/webhook", response_model=WebhookConfigResponse)
+async def configure_webhook(request: WebhookConfigRequest):
+    """
+    Configura las notificaciones del webhook
+    
+    Args:
+        enabled: Habilitar o deshabilitar notificaciones
+        url: URL del webhook (opcional)
+    """
+    global WEBHOOK_ENABLED, WEBHOOK_URL
+    
+    WEBHOOK_ENABLED = request.enabled
+    
+    if request.url:
+        WEBHOOK_URL = request.url
+    
+    return WebhookConfigResponse(
+        status="success",
+        message=f"Webhook {'habilitado' if WEBHOOK_ENABLED else 'deshabilitado'}",
+        enabled=WEBHOOK_ENABLED,
+        url=WEBHOOK_URL
+    )
+
+# Endpoint para obtener la configuración actual del webhook
+@app.get("/config/webhook", response_model=WebhookConfigResponse)
+async def get_webhook_config():
+    """
+    Obtiene la configuración actual del webhook
+    """
+    return WebhookConfigResponse(
+        status="success",
+        message="Configuración actual del webhook",
+        enabled=WEBHOOK_ENABLED,
+        url=WEBHOOK_URL
+    )
 
 if __name__ == "__main__":
     main() 
