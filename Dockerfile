@@ -118,6 +118,9 @@ ENV DISPLAY=:99
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Instalar psutil explícitamente para asegurar su disponibilidad
+RUN pip install --no-cache-dir psutil
+
 # Install Playwright and its browsers with proper permissions
 RUN playwright install --with-deps chromium firefox webkit && \
     chmod -R 777 /root/.cache/ms-playwright
