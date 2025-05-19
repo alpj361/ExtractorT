@@ -20,3 +20,4 @@ pytesseract==0.3.10
 pillow==10.1.0
 psutil==7.0.0
 aiohttp==3.11.18
+feedparser==6.0.11
