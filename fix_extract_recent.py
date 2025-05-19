@@ -186,7 +186,7 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
         return []
     
     # Obtener fechas para filtros dinámicos
-    now = datetime.utcnow()
+    now = datetime.datetime.utcnow()
     today = now.strftime('%Y-%m-%d')
     yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
     last_week = (now - timedelta(days=7)).strftime('%Y-%m-%d')
