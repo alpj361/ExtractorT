@@ -46,6 +46,8 @@ import csv
 import glob
 import base64
 import aiohttp
+import feedparser
+import datetime
 
 # Configurar logging
 logging.basicConfig(
@@ -4374,6 +4376,289 @@ async def get_webhook_config():
         enabled=WEBHOOK_ENABLED,
         url=WEBHOOK_URL
     )
+
+# Palabras clave para contextos temáticos
+CONTEXT_KEYWORDS = {
+    "general": [],
+    "politica": ["política", "gobierno", "congreso", "elecciones", "presidente", "diputado", "partido", "ministro", "reforma", "votación", "candidato", "parlamento", "asamblea"],
+    "leyes": ["iniciativa", "decreto", "ley", "reforma", "congreso", "dictamen", "aprobación", "legislativo", "artículo", "proyecto de ley", "comisión"],
+    "finanzas": ["finanzas", "economía", "SAT", "impuestos", "banco", "Banco de Guatemala", "inflación", "dólar", "PIB", "deuda", "presupuesto", "superintendencia", "mercado", "exportación", "importación", "remesas"],
+    "sociedad": ["salud", "educación", "seguridad", "cultura", "social", "hospital", "escuela", "universidad", "violencia", "pandemia", "covid", "vacuna", "ministerio de salud", "ministerio de educación"],
+}
+
+# --- Función principal de agregación de noticias ---
+async def get_news_for_location(location="guatemala", limit=10, context="general", custom_keywords=None, include_hashtags=False):
+    now = datetime.datetime.utcnow()
+    max_age_hours = 48  # Solo incluir noticias/tweets de las últimas 48 horas
+
+    trending_topics = await get_trending_topics(location)
+    official_tweets = []
+    if include_hashtags:
+        official_tweets = await get_official_tweets(location)
+    official_news = await get_official_news(location)
+    all_items = trending_topics + official_tweets + official_news
+    # Filtrar por contexto
+    filtered = filter_by_context(all_items, context, custom_keywords)
+    # Filtrar por fecha reciente (solo para tweets y noticias)
+    def is_recent(item):
+        date_str = item.get("published_at")
+        if not date_str:
+            return True  # Si no hay fecha, dejarlo pasar (ej: trending topics)
+        try:
+            # Intentar varios formatos
+            for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.datetime.strptime(date_str, fmt)
+                    break
+                except Exception:
+                    continue
+            else:
+                return False
+            # Convertir a UTC si es necesario
+            if dt.tzinfo:
+                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            age = (now - dt).total_seconds() / 3600.0
+            return age <= max_age_hours
+        except Exception:
+            return False
+    filtered = [item for item in filtered if is_recent(item)]
+    return filtered[:limit]
+
+# --- Modificación del endpoint /news para permitir controlar hashtags ---
+@app.get('/news')
+async def news_endpoint(
+    location: str = Query("guatemala", description="Ubicación para obtener noticias"),
+    limit: int = Query(10, ge=1, le=50, description="Máximo número de resultados"),
+    context: str = Query("general", description="Contexto temático: general, politica, leyes, finanzas, sociedad, personalizado"),
+    keywords: str = Query(None, description="Palabras clave personalizadas, separadas por coma (solo si context=personalizado)"),
+    include_hashtags: bool = Query(False, description="Incluir extracción de hashtags (más lento)")
+):
+    custom_keywords = [k.strip() for k in keywords.split(",")] if keywords and context == "personalizado" else None
+    news = await get_news_for_location(location, limit, context, custom_keywords, include_hashtags=include_hashtags)
+    return {
+        "status": "success",
+        "location": location,
+        "context": context,
+        "news": news
+    }
+
+# --- Función de filtrado por contexto ---
+def filter_by_context(items, context, custom_keywords=None):
+    if context == "general":
+        return items
+    if context == "personalizado" and custom_keywords:
+        keywords = [k.lower() for k in custom_keywords]
+    else:
+        keywords = [k.lower() for k in CONTEXT_KEYWORDS.get(context, [])]
+    filtered = []
+    for item in items:
+        text = (item.get("title", "") + " " + item.get("summary", "") + " " + " ".join(item.get("keywords", []))).lower()
+        if any(kw in text for kw in keywords):
+            filtered.append(item)
+    return filtered
+
+# --- Placeholders para funciones de scraping/agregación ---
+async def get_trending_topics(location):
+    """
+    Llama al endpoint interno /trending para obtener trending topics para la ubicación dada.
+    """
+    url = f"http://localhost:8000/trending?location={location}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                # Espera una lista de tendencias en data['trends24_trends'] o similar
+                trends = data.get('trends24_trends', [])
+                # Formatear como objetos de tipo 'trend'
+                return [
+                    {
+                        "type": "trend",
+                        "title": t,
+                        "summary": t,
+                        "source": "Trending Topic",
+                        "url": None,
+                        "published_at": None,
+                        "category": None,
+                        "entities": {},
+                        "keywords": [],
+                        "topics": [],
+                        "trend_match": [t]
+                    } for t in trends
+                ]
+    except Exception as e:
+        print(f"Error obteniendo trending topics: {e}")
+        return []
+
+# Lista de hashtags relevantes para Guatemala (puedes expandirla)
+RELEVANT_HASHTAGS = [
+    "Guatemala", "CongresoGT", "EleccionesGT", "Ley", "FinanzasGT", "EconomiaGT", "SaludGT", "EducacionGT"
+]
+
+# Lista de perfiles oficiales (puedes expandirla)
+OFFICIAL_PROFILES = [
+    "GuatemalaGob", "MinSaludGuate", "mingobguate", "CongresoGuate", "MPguatemala", "PDHgt", "Ejercito_GT", "SATGT", "AGN_noticias", "MinfinGT", "MineducGT", "MintrabajoGT", "MinexGt", "MinGob", "PNCdeGuatemala", "INAPgt", "MuniGuate",
+    "prensa_libre", "soy_502", "PublinewsGT", "lahoragt", "el_Periodico", "EmisorasUnidas", "CanalAntigua", "Guatevision_tv",
+    "BancoGuatemala", "CIVguate", "INABguatemala", "ConredGuatemala"
+]
+
+async def get_official_tweets(location):
+    """
+    Usa el endpoint interno /extract_hashtag para obtener tweets recientes de hashtags y perfiles oficiales.
+    """
+    results = []
+    async with aiohttp.ClientSession() as session:
+        # 1. Consultar hashtags relevantes
+        for hashtag in RELEVANT_HASHTAGS:
+            url = f"http://localhost:8000/extract_hashtag/{hashtag}?max_tweets=5&min_tweets=2&max_scrolls=5"
+            try:
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    for tweet in data.get("tweets", []):
+                        results.append({
+                            "type": "tweet",
+                            "title": tweet.get("text", ""),
+                            "summary": tweet.get("text", ""),
+                            "source": f"#{hashtag}",
+                            "url": f"https://x.com/{tweet.get('username','')}/status/{tweet.get('tweet_id','')}",
+                            "published_at": tweet.get("timestamp"),
+                            "category": None,
+                            "entities": {},
+                            "keywords": [],
+                            "topics": [],
+                            "trend_match": []
+                        })
+            except Exception as e:
+                print(f"Error obteniendo tweets para #{hashtag}: {e}")
+        # 2. Consultar perfiles oficiales
+        for profile in OFFICIAL_PROFILES:
+            url = f"http://localhost:8000/extract_hashtag/{profile}?max_tweets=3&min_tweets=1&max_scrolls=3"
+            try:
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    for tweet in data.get("tweets", []):
+                        results.append({
+                            "type": "tweet",
+                            "title": tweet.get("text", ""),
+                            "summary": tweet.get("text", ""),
+                            "source": f"@{profile}",
+                            "url": f"https://x.com/{tweet.get('username','')}/status/{tweet.get('tweet_id','')}",
+                            "published_at": tweet.get("timestamp"),
+                            "category": None,
+                            "entities": {},
+                            "keywords": [],
+                            "topics": [],
+                            "trend_match": []
+                        })
+            except Exception as e:
+                print(f"Error obteniendo tweets para @{profile}: {e}")
+    return results
+
+OFFICIAL_NEWS_SOURCES = [
+    {
+        "name": "Prensa Libre",
+        "rss": "https://www.prensalibre.com/feed/",
+        "url": "https://www.prensalibre.com/"
+    },
+    {
+        "name": "Soy502",
+        "rss": "https://www.soy502.com/rss",
+        "url": "https://www.soy502.com/"
+    },
+    {
+        "name": "La Hora",
+        "rss": "https://lahora.gt/feed/",
+        "url": "https://lahora.gt/"
+    },
+    {
+        "name": "Diario de Centro América",
+        "rss": "https://dca.gob.gt/noticias-guatemala/feed/",
+        "url": "https://dca.gob.gt/noticias-guatemala/"
+    },
+    {
+        "name": "Radio TGW",
+        "rss": None,  # No RSS público conocido
+        "url": "https://radiotgw.gob.gt/"
+    },
+    {
+        "name": "Canal 9 (Congreso)",
+        "rss": None,  # No RSS público conocido
+        "url": "https://www.congreso.gob.gt/canal9/"
+    },
+    {
+        "name": "TV USAC",
+        "rss": None,  # No RSS público conocido
+        "url": "https://tvusac.com.gt/"
+    },
+]
+
+async def fetch_rss_news(session, source, limit=5):
+    try:
+        async with session.get(source["rss"], timeout=10) as resp:
+            content = await resp.read()
+            feed = feedparser.parse(content)
+            news = []
+            for entry in feed.entries[:limit]:
+                news.append({
+                    "type": "news",
+                    "title": entry.get("title", ""),
+                    "summary": entry.get("summary", ""),
+                    "source": source["name"],
+                    "url": entry.get("link", ""),
+                    "published_at": entry.get("published", None),
+                    "category": None,
+                    "entities": {},
+                    "keywords": [],
+                    "topics": [],
+                    "trend_match": []
+                })
+            return news
+    except Exception as e:
+        print(f"Error obteniendo RSS de {source['name']}: {e}")
+        return []
+
+async def fetch_html_news(session, source, limit=5):
+    # Fallback si no hay RSS, ejemplo simple para Prensa Libre y Soy502
+    try:
+        async with session.get(source["url"], timeout=10) as resp:
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
+            news = []
+            # Ejemplo para Prensa Libre: titulares en <h2> con clase "title"
+            for h2 in soup.find_all("h2", class_="title")[:limit]:
+                a = h2.find("a")
+                if a and a.text:
+                    news.append({
+                        "type": "news",
+                        "title": a.text.strip(),
+                        "summary": "",
+                        "source": source["name"],
+                        "url": a["href"] if a.has_attr("href") else source["url"],
+                        "published_at": None,
+                        "category": None,
+                        "entities": {},
+                        "keywords": [],
+                        "topics": [],
+                        "trend_match": []
+                    })
+            return news
+    except Exception as e:
+        print(f"Error scrapeando HTML de {source['name']}: {e}")
+        return []
+
+async def get_official_news(location):
+    """
+    Extrae noticias de medios oficiales usando RSS o scraping.
+    """
+    results = []
+    async with aiohttp.ClientSession() as session:
+        for source in OFFICIAL_NEWS_SOURCES:
+            # 1. Intentar RSS
+            news = await fetch_rss_news(session, source, limit=5)
+            if not news:
+                # 2. Fallback: intentar scraping HTML
+                news = await fetch_html_news(session, source, limit=5)
+            results.extend(news)
+    return results
 
 if __name__ == "__main__":
     main() 
