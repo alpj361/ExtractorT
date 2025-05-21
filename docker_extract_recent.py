@@ -737,38 +737,32 @@ async def perform_login():
         login_in_progress = False
 
 def check_storage_file():
-    """
-    Verifica si el archivo de almacenamiento de Firefox existe y es válido.
-    También comprueba la fecha de modificación para ver si ha expirado.
-    """
     storage_path = Path(STORAGE_FILE)
     
-    # Verificar si existe
     if not storage_path.exists():
-        logger.warning(f"Archivo de estado {STORAGE_FILE} no encontrado.")
+        logger.warning(f"Archivo de almacenamiento no encontrado: {STORAGE_FILE}")
         return False
-    
-    # Verificar si es un JSON válido
-    try:
-        with open(storage_path, 'r') as f:
-            storage_data = json.load(f)
-            
-        # Verificar si tiene cookies
-        if 'cookies' not in storage_data or not storage_data['cookies']:
-            logger.warning(f"Archivo de estado {STORAGE_FILE} no contiene cookies válidas.")
-            return False
-            
-        # Verificar fecha de modificación (más de 24 horas = expirado)
-        mod_time = storage_path.stat().st_mtime
-        mod_date = datetime.datetime.fromtimestamp(mod_time)
-        if (datetime.datetime.now() - mod_date) > datetime.timedelta(hours=24):
-            logger.warning(f"Archivo de estado {STORAGE_FILE} tiene más de 24 horas (creado el {mod_date.isoformat()})")
-            return False
-            
-        return True
         
-    except (json.JSONDecodeError, IOError) as e:
-        logger.warning(f"Error al leer archivo de estado {STORAGE_FILE}: {e}")
+    # Verificar si el archivo es demasiado antiguo (> 24 horas)
+    mod_time = storage_path.stat().st_mtime
+    mod_date = dt_module.datetime.fromtimestamp(mod_time)
+    if (dt_module.datetime.now() - mod_date) > dt_module.timedelta(hours=24):
+        logger.warning(f"Archivo de almacenamiento demasiado antiguo: {STORAGE_FILE} ({mod_date})")
+        return False
+        
+    # Verificar si el archivo parece válido (JSON básico)
+    try:
+        with open(STORAGE_FILE, 'r') as f:
+            data = json.load(f)
+            # Verificar estructura mínima
+            if not isinstance(data, dict) or 'cookies' not in data:
+                logger.warning(f"Estructura inválida en archivo de almacenamiento: {STORAGE_FILE}")
+                return False
+                
+        logger.info(f"Archivo de almacenamiento válido: {STORAGE_FILE}")
+        return True
+    except Exception as e:
+        logger.warning(f"Error al leer archivo de almacenamiento: {e}")
         return False
 
 async def ensure_valid_storage():
@@ -839,11 +833,11 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
                 return []
     
     # Obtener fechas para filtros dinámicos
-    now = datetime.datetime.utcnow()
+    now = dt_module.datetime.utcnow()
     today = now.strftime('%Y-%m-%d')
-    yesterday = (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-    last_week = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
-    last_month = (now - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    yesterday = (now - dt_module.timedelta(days=1)).strftime('%Y-%m-%d')
+    last_week = (now - dt_module.timedelta(days=7)).strftime('%Y-%m-%d')
+    last_month = (now - dt_module.timedelta(days=30)).strftime('%Y-%m-%d')
     
     logger.info(f"Fechas para filtros - Hora actual UTC: {now.isoformat()}, Hoy: {today}, Último mes: {last_month}")
     
@@ -888,7 +882,7 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
                     # Aumentar los tiempos de espera por defecto para evitar errores de timeout
                     page.set_default_timeout(30000)  # 30 segundos en entornos Docker/Railway
                     
-                    now = datetime.datetime.utcnow()
+                    now = dt_module.datetime.utcnow()
                     
                     # Lista de URLs a intentar, OPTIMIZADA para tweets recientes y con contenido
                     search_urls = [
@@ -1436,7 +1430,7 @@ def save_results_to_csv(tweets, username):
         logger.warning("No hay tweets para guardar")
         return None
     
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt_module.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"tweets_recientes_{username}_{timestamp}.csv"
     
     df = pd.DataFrame(tweets)
@@ -1493,7 +1487,7 @@ async def main_async():
                     try:
                         timestamp = t['timestamp']
                         if 'Z' in timestamp:
-                            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                         else:
                             dt = pd.to_datetime(timestamp).to_pydatetime()
                         formatted_dates.append(dt)
@@ -1511,7 +1505,7 @@ async def main_async():
                     try:
                         timestamp = tweet['timestamp']
                         if 'Z' in timestamp:
-                            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                         else:
                             dt = pd.to_datetime(timestamp).to_pydatetime()
                         date = dt.strftime('%Y-%m-%d %H:%M')
@@ -1631,7 +1625,7 @@ async def api_extract_hashtag_recent(request: ExtractionRequest):
                 try:
                     timestamp = t['timestamp']
                     if 'Z' in timestamp:
-                        dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                     else:
                         dt = pd.to_datetime(timestamp).to_pydatetime()
                     formatted_dates.append(dt)
@@ -2343,7 +2337,7 @@ async def trending_endpoint(
         return {"status": "error", "message": f"Ubicación no soportada. Opciones: {', '.join(WOEID_MAP.keys())}"}
     
     # Timeout para toda la operación
-    start_time = datetime.datetime.now()
+    start_time = dt_module.datetime.now()
     
     try:
         logger.info(f"===== INICIANDO EXTRACCIÓN DE TENDENCIAS PARA {location_key.upper()} =====")
@@ -2359,7 +2353,7 @@ async def trending_endpoint(
         trends24_trends = trends24_trends[:15]
         
         # Calcular tiempo total de ejecución
-        execution_time = (datetime.datetime.now() - start_time).total_seconds()
+        execution_time = (dt_module.datetime.now() - start_time).total_seconds()
         logger.info(f"===== EXTRACCIÓN DE TENDENCIAS COMPLETADA EN {execution_time:.1f} SEGUNDOS =====")
         
         # Devolver los resultados (copiando Trends24 en ambos campos para mantener compatibilidad)
@@ -2372,7 +2366,7 @@ async def trending_endpoint(
         }
     except Exception as e:
         # Calcular tiempo de ejecución incluso en caso de error
-        execution_time = (datetime.datetime.now() - start_time).total_seconds()
+        execution_time = (dt_module.datetime.now() - start_time).total_seconds()
         logger.error(f"Error extrayendo tendencias: {e}")
         logger.error(traceback.format_exc())
         logger.error(f"Tiempo hasta error: {execution_time:.1f} segundos")
@@ -2397,9 +2391,9 @@ async def capture_trends24_screenshot(location_key):
     }
     country = url_map.get(location_key, "guatemala")
     url = f"https://trends24.in/{country}/" if country else "https://trends24.in/"
-    screenshot_path = f"trends24_screenshot_{location_key}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    screenshot_path = f"trends24_screenshot_{location_key}_{dt_module.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     # Ruta para captura procesada con solo las tablas de tendencias
-    processed_screenshot_path = f"trends24_processed_{location_key}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    processed_screenshot_path = f"trends24_processed_{location_key}_{dt_module.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     
     # Configurar opciones específicas para Docker/Railway
     browser_args = []
@@ -2472,9 +2466,9 @@ async def capture_trends24_screenshot(location_key):
                     
                     # Capturar pantalla completa con timeout
                     logger.info("Capturando screenshot...")
-                    start_time = datetime.datetime.now()
+                    start_time = dt_module.datetime.now()
                     await page.screenshot(path=screenshot_path, full_page=True, timeout=10000)
-                    end_time = datetime.datetime.now()
+                    end_time = dt_module.datetime.now()
                     duration = (end_time - start_time).total_seconds()
                     logger.info(f"Screenshot capturado en {duration} segundos")
                     
@@ -2626,7 +2620,7 @@ async def get_trending_for_woeid_with_screenshot(woeid: int):
         return [], None
 
     trends = []
-    screenshot_path = f"trending_screenshot_{woeid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    screenshot_path = f"trending_screenshot_{woeid}_{dt_module.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
     for browser_attempt in range(MAX_RETRIES):
         try:
@@ -2721,8 +2715,8 @@ async def scrape_trends24_html(location_key, force_refresh=False):
     if not force_refresh and cache_key in trends_cache:
         timestamp, cached_trends = trends_cache[cache_key]
         # Verificar si el caché aún es válido
-        if (datetime.datetime.now() - timestamp).total_seconds() < max_age_minutes * 60:
-            logger.info(f"Usando tendencias en caché para {location_key} (edad: {(datetime.datetime.now() - timestamp).total_seconds() / 60:.1f} minutos)")
+        if (dt_module.datetime.now() - timestamp).total_seconds() < max_age_minutes * 60:
+            logger.info(f"Usando tendencias en caché para {location_key} (edad: {(dt_module.datetime.now() - timestamp).total_seconds() / 60:.1f} minutos)")
             return cached_trends
     
     # Mapeo de ubicaciones a URLs
@@ -2820,7 +2814,7 @@ async def scrape_trends24_html(location_key, force_refresh=False):
             unique_trends.append(clean_trend)
     
     # Guardar en caché
-    trends_cache[cache_key] = (datetime.datetime.now(), unique_trends)
+    trends_cache[cache_key] = (dt_module.datetime.now(), unique_trends)
     
     logger.info(f"Total de tendencias únicas de Trends24: {len(unique_trends)}")
     return unique_trends
