@@ -46,7 +46,8 @@ import glob
 import base64
 import aiohttp
 import feedparser
-import datetime
+from datetime import datetime
+import datetime as dt_module
 
 # Configurar logging
 logging.basicConfig(
@@ -166,7 +167,7 @@ def register_task(task_type: TaskType, params: Dict[str, Any]) -> str:
         task_id=task_id,
         type=task_type,
         status=TaskStatus.PENDING,
-        created_at=datetime.datetime.now().isoformat(),
+        created_at=dt_module.datetime.now().isoformat(),
         params=params,
         progress=0.0
     )
@@ -182,24 +183,24 @@ def update_task_status(task_id: str, status: TaskStatus, result=None, error=None
     task.status = status
     
     if status == TaskStatus.RUNNING and task.started_at is None:
-        task.started_at = datetime.datetime.now().isoformat()
+        task.started_at = dt_module.datetime.now().isoformat()
     
     if status == TaskStatus.COMPLETED or status == TaskStatus.FAILED:
-        task.completed_at = datetime.datetime.now().isoformat()
+        task.completed_at = dt_module.datetime.now().isoformat()
         
         # Enviar notificación al webhook si está habilitado
         if WEBHOOK_ENABLED:
             # Crear datos para enviar al webhook
             webhook_data = {
                 "type": str(task.type),  # Convertir a string para garantizar la serialización
-                "params": {k: str(v) if isinstance(v, (datetime, Enum)) else v 
+                "params": {k: str(v) if isinstance(v, (dt_module.datetime, Enum)) else v 
                           for k, v in task.params.items() if not isinstance(v, complex)},
                 "execution_time": 0
             }
             
             if task.started_at:
-                start_time = datetime.datetime.fromisoformat(task.started_at)
-                end_time = datetime.datetime.fromisoformat(task.completed_at)
+                start_time = dt_module.datetime.fromisoformat(task.started_at)
+                end_time = dt_module.datetime.fromisoformat(task.completed_at)
                 webhook_data["execution_time"] = (end_time - start_time).total_seconds()
             
             if result is not None:
@@ -275,7 +276,7 @@ async def run_background_task(task_id: str):
                     try:
                         timestamp = t['timestamp']
                         if 'Z' in timestamp:
-                            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                         else:
                             dt = pd.to_datetime(timestamp).to_pydatetime()
                         formatted_dates.append(dt)
@@ -332,7 +333,7 @@ async def run_background_task(task_id: str):
                     try:
                         timestamp = t['timestamp']
                         if 'Z' in timestamp:
-                            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                         else:
                             dt = pd.to_datetime(timestamp).to_pydatetime()
                         formatted_dates.append(dt)
@@ -413,7 +414,17 @@ async def run_background_task(task_id: str):
     except Exception as e:
         logger.error(f"Error en tarea {task_id}: {e}")
         logger.error(traceback.format_exc())
-        update_task_status(task_id, TaskStatus.FAILED, error=str(e))
+        # Evitamos el error de tipo en isinstance verificando que task_id exista antes de actualizar
+        if task_id in tasks:
+            error_msg = str(e)
+            try:
+                update_task_status(task_id, TaskStatus.FAILED, error=error_msg)
+            except Exception as inner_e:
+                logger.error(f"Error adicional al actualizar estado de tarea: {inner_e}")
+                # Actualización manual si falla la función normal
+                tasks[task_id].status = TaskStatus.FAILED
+                tasks[task_id].error = error_msg
+                tasks[task_id].completed_at = dt_module.datetime.now().isoformat()
 
 # Modelos de datos para la API
 class ExtractionRequest(BaseModel):
@@ -550,7 +561,7 @@ async def api_extract_recent(request: ExtractionRequest):
                 try:
                     timestamp = t['timestamp']
                     if 'Z' in timestamp:
-                        dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        dt = dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                     else:
                         dt = pd.to_datetime(timestamp).to_pydatetime()
                     formatted_dates.append(dt)
@@ -1076,7 +1087,7 @@ async def extract_recent_tweets(username, max_tweets=20, min_tweets=10, max_scro
                         if len(filtered_tweets) > 0:
                             try:
                                 most_recent = filtered_tweets[0]
-                                date_str = datetime.datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                                date_str = dt_module.datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
                                 logger.info(f"Tweet más reciente: {date_str} - {most_recent['text'][:50]}...")
                             except Exception as e:
                                 logger.error(f"Error al mostrar información del tweet más reciente: {e}")
@@ -1371,7 +1382,7 @@ async def _extract_tweets_data(page, max_tweets=20):
             
             # Verificación adicional: Asegurarse de que el timestamp tenga formato ISO
             try:
-                datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                dt_module.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             except ValueError:
                 logger.warning(f"Timestamp inválido en tweet #{idx+1}: {timestamp}. Saltando tweet.")
                 continue
@@ -1541,7 +1552,7 @@ def main():
         # Configure the health check endpoint
         @app.get("/health")
         async def health_check():
-            return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()}
+            return {"status": "healthy", "timestamp": dt_module.datetime.now().isoformat()}
         
         # Run the FastAPI app with Uvicorn
         port = int(os.environ.get("PORT", 8000))
@@ -1696,9 +1707,9 @@ async def extract_hashtag_tweets(hashtag, max_tweets=20, min_tweets=10, max_scro
     launch_options["args"] = firefox_args
     
     # Preparación para entornos Docker/Railway
-    now = datetime.datetime.utcnow()
-    last_week = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
-    last_month = (now - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    now = dt_module.datetime.utcnow()
+    last_week = (now - dt_module.timedelta(days=7)).strftime('%Y-%m-%d')
+    last_month = (now - dt_module.timedelta(days=30)).strftime('%Y-%m-%d')
     
     # Control de reintentos para problemas de navegador
     for browser_attempt in range(MAX_RETRIES):
@@ -1930,7 +1941,7 @@ async def extract_hashtag_tweets(hashtag, max_tweets=20, min_tweets=10, max_scro
                         if len(hashtag_tweets) > 0:
                             try:
                                 most_recent = hashtag_tweets[0]
-                                date_str = datetime.datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                                date_str = dt_module.datetime.fromisoformat(most_recent['timestamp'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
                                 logger.info(f"Tweet más reciente para #{hashtag}: {date_str} - {most_recent['text'][:50]}...")
                             except Exception as e:
                                 logger.error(f"Error al mostrar información del tweet más reciente: {e}")
@@ -1993,7 +2004,7 @@ def save_hashtag_results_to_csv(tweets, hashtag):
         logger.warning("No hay tweets para guardar")
         return None
     
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt_module.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"tweets_hashtag_{hashtag}_{timestamp}.csv"
     
     df = pd.DataFrame(tweets)
@@ -2947,7 +2958,7 @@ class HashtagDetailExtractor:
     
     def __init__(self, hashtag, max_tweets=20, min_tweets=10, max_scrolls=10, 
                 include_comments=True, comment_limit=10, time_limit_seconds=250,
-                lang="es", min_likes=10, search_mode="top"):
+                lang="es", min_likes=0, search_mode="top"):
         """
         Inicializa el extractor con los parámetros necesarios.
         
@@ -2984,7 +2995,7 @@ class HashtagDetailExtractor:
         if not self.start_time:
             return False
         
-        elapsed = (datetime.datetime.now() - self.start_time).total_seconds()
+        elapsed = (dt_module.datetime.now() - self.start_time).total_seconds()
         return elapsed >= self.time_limit_seconds
     
     def _create_empty_enriched_tweet(self, tweet):
@@ -3335,7 +3346,7 @@ class HashtagDetailExtractor:
                 # Tomar captura de pantalla para depuración
                 if not DOCKER_ENVIRONMENT:
                     try:
-                        screenshot_path = f"metrics_debug_{datetime.datetime.now().strftime('%H%M%S')}.png"
+                        screenshot_path = f"metrics_debug_{dt_module.datetime.now().strftime('%H%M%S')}.png"
                         await page.screenshot(path=screenshot_path)
                         self.logger.info(f"Captura para depuración de métricas guardada: {screenshot_path}")
                     except Exception as ss_err:
@@ -3730,8 +3741,9 @@ class HashtagDetailExtractor:
                     return self._create_empty_enriched_tweet(tweet)
         
         # Verificar si cumple con requisitos mínimos
-        if enriched_tweet.get("likes", 0) < self.min_likes:
-            self.logger.info(f"Tweet {tweet_id} no cumple con el mínimo de likes requerido")
+        if self.min_likes > 0 and enriched_tweet.get("likes", 0) < self.min_likes:
+            self.logger.info(f"Tweet {tweet_id} no cumple con el mínimo de likes requerido ({enriched_tweet.get('likes', 0)} < {self.min_likes})")
+            # Marcarlo pero no excluirlo completamente para usarlo como fallback si es necesario
             enriched_tweet["should_exclude"] = True
                 
         return enriched_tweet
@@ -3741,7 +3753,7 @@ class HashtagDetailExtractor:
         Orquesta todo el proceso de extracción con estrategia mejorada para garantizar
         la obtención de suficientes tweets con métricas.
         """
-        self.start_time = datetime.datetime.now()
+        self.start_time = dt_module.datetime.now()
         self.logger.info(f"Iniciando extracción detallada para #{self.hashtag}")
         
         # Obtener más tweets base de los necesarios para tener margen
@@ -3846,9 +3858,13 @@ class HashtagDetailExtractor:
                 
                 # Clasificar resultados
                 for result in batch_results:
-                    # Tweet con buenas métricas (al menos likes > 0)
-                    if result.get("likes", 0) > 0 and not result.get("should_exclude", False):
-                        good_results.append(result)
+                    # Tweet con buenas métricas (al menos tiene métricas válidas)
+                    if not result.get("should_exclude", False):
+                        # Si tiene likes o replies, considerarlo bueno
+                        if result.get("likes", 0) > 0 or result.get("replies", 0) > 0:
+                            good_results.append(result)
+                        else:
+                            fallback_results.append(result)
                     else:
                         fallback_results.append(result)
                 
@@ -3896,7 +3912,7 @@ class HashtagDetailExtractor:
             if "should_exclude" in tweet:
                 del tweet["should_exclude"]
         
-        total_time = (datetime.datetime.now() - self.start_time).total_seconds()
+        total_time = (dt_module.datetime.now() - self.start_time).total_seconds()
         self.logger.info(f"Extracción completada: {len(final_results)} tweets en {total_time:.1f}s")
         
         return {
@@ -3925,14 +3941,14 @@ class HashtagDetailResponse(BaseModel):
 @app.get("/extract/hashtag/details/{hashtag}", response_model=HashtagDetailResponse)
 async def extract_hashtag_details_endpoint(
     hashtag: str,
-    max_tweets: int = Query(10, ge=1, le=50, description="Máximo número de tweets a extraer"), 
-    min_tweets: int = Query(5, ge=1, le=20, description="Mínimo número de tweets a extraer"),
-    max_scrolls: int = Query(5, ge=1, le=20, description="Máximo número de desplazamientos"),
+    max_tweets: int = Query(20, ge=1, le=50, description="Máximo número de tweets a extraer"), 
+    min_tweets: int = Query(10, ge=1, le=40, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos"),
     include_comments: bool = Query(True, description="Incluir comentarios en los resultados"),
-    comment_limit: int = Query(5, ge=1, le=20, description="Máximo número de comentarios por tweet"),
+    comment_limit: int = Query(10, ge=5, le=20, description="Máximo número de comentarios por tweet"),
     time_limit: int = Query(250, ge=30, le=290, description="Límite de tiempo en segundos"),
     lang: str = Query("es", description="Idioma de los tweets a extraer (es, en, pt, etc.)"),
-    min_likes: int = Query(10, ge=0, le=1000, description="Número mínimo de likes que debe tener un tweet para ser incluido"),
+    min_likes: int = Query(0, ge=0, le=1000, description="Número mínimo de likes que debe tener un tweet para ser incluido"),
     search_mode: str = Query("top", description="Modo de búsqueda: 'top' para tweets populares, 'live' para tiempo real")
 ):
     """
@@ -3970,7 +3986,7 @@ async def extract_hashtag_details_endpoint(
         }
     
     extraction_in_progress = True
-    start_time = datetime.datetime.now()
+    start_time = dt_module.datetime.now()
     
     try:
         # Crear instancia del extractor con límite de tiempo
@@ -4001,7 +4017,7 @@ async def extract_hashtag_details_endpoint(
             }
         
         # Calcular tiempo total
-        total_time = (datetime.datetime.now() - start_time).total_seconds()
+        total_time = (dt_module.datetime.now() - start_time).total_seconds()
         
         # Construir respuesta exitosa
         return {
@@ -4014,7 +4030,7 @@ async def extract_hashtag_details_endpoint(
         
     except Exception as e:
         # Calcular tiempo hasta el error
-        error_time = (datetime.datetime.now() - start_time).total_seconds()
+        error_time = (dt_module.datetime.now() - start_time).total_seconds()
         logger.error(f"Error en extracción detallada para #{hashtag} después de {error_time:.1f}s: {e}")
         logger.error(traceback.format_exc())
         return {
@@ -4036,7 +4052,7 @@ def save_hashtag_results_to_csv(tweets, hashtag):
         logger.warning("No hay tweets para guardar")
         return None
     
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt_module.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"tweets_hashtag_{hashtag}_{timestamp}.csv"
     
     df = pd.DataFrame(tweets)
@@ -4193,14 +4209,14 @@ async def async_extract_hashtag_endpoint(
 @app.get("/async/extract/hashtag/details/{hashtag}", response_model=TaskResponse)
 async def async_extract_hashtag_details_endpoint(
     hashtag: str,
-    max_tweets: int = Query(10, ge=1, le=50, description="Máximo número de tweets a extraer"), 
-    min_tweets: int = Query(5, ge=1, le=20, description="Mínimo número de tweets a extraer"),
-    max_scrolls: int = Query(5, ge=1, le=20, description="Máximo número de desplazamientos"),
+    max_tweets: int = Query(20, ge=1, le=50, description="Máximo número de tweets a extraer"), 
+    min_tweets: int = Query(10, ge=1, le=40, description="Mínimo número de tweets a extraer"),
+    max_scrolls: int = Query(10, ge=1, le=30, description="Máximo número de desplazamientos"),
     include_comments: bool = Query(True, description="Incluir comentarios en los resultados"),
-    comment_limit: int = Query(5, ge=1, le=20, description="Máximo número de comentarios por tweet"),
+    comment_limit: int = Query(10, ge=5, le=20, description="Máximo número de comentarios por tweet"),
     time_limit: int = Query(250, ge=30, le=290, description="Límite de tiempo en segundos"),
     lang: str = Query("es", description="Idioma de los tweets a extraer (es, en, pt, etc.)"),
-    min_likes: int = Query(10, ge=0, le=1000, description="Número mínimo de likes que debe tener un tweet para ser incluido"),
+    min_likes: int = Query(0, ge=0, le=1000, description="Número mínimo de likes que debe tener un tweet para ser incluido"),
     search_mode: str = Query("top", description="Modo de búsqueda: 'top' para tweets populares, 'live' para tiempo real"),
     background_tasks: BackgroundTasks = None
 ):
@@ -4263,12 +4279,12 @@ async def clean_old_tasks():
     """Elimina tareas completadas/fallidas con más de 1 día de antigüedad"""
     while True:
         try:
-            now = datetime.datetime.now()
+            now = dt_module.datetime.now()
             to_remove = []
             
             for task_id, task in tasks.items():
                 if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
-                    completed_at = datetime.datetime.fromisoformat(task.completed_at) if task.completed_at else None
+                    completed_at = dt_module.datetime.fromisoformat(task.completed_at) if task.completed_at else None
                     if completed_at and (now - completed_at).total_seconds() > 86400:  # 1 día
                         to_remove.append(task_id)
             
@@ -4303,7 +4319,7 @@ async def notify_webhook(task_id: str, status: str, data: Dict[str, Any]):
         payload = {
             "task_id": task_id,
             "status": status,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": dt_module.datetime.now().isoformat(),
             "data": data
         }
         
@@ -4311,7 +4327,7 @@ async def notify_webhook(task_id: str, status: str, data: Dict[str, Any]):
         simplified_payload = {
             "task_id": task_id,
             "status": status,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": dt_module.datetime.now().isoformat(),
             "type": data.get("type", ""),
             "execution_time": data.get("execution_time", 0),
             "message": data.get("result_summary", {}).get("message", "") if "result_summary" in data else "",
@@ -4387,7 +4403,7 @@ CONTEXT_KEYWORDS = {
 
 # --- Función principal de agregación de noticias ---
 async def get_news_for_location(location="guatemala", limit=10, context="general", custom_keywords=None, include_hashtags=False):
-    now = datetime.datetime.utcnow()
+    now = dt_module.datetime.utcnow()
     max_age_hours = 48  # Solo incluir noticias/tweets de las últimas 48 horas
 
     trending_topics = await get_trending_topics(location)
@@ -4407,7 +4423,7 @@ async def get_news_for_location(location="guatemala", limit=10, context="general
             # Intentar varios formatos
             for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
                 try:
-                    dt = datetime.datetime.strptime(date_str, fmt)
+                    dt = dt_module.datetime.strptime(date_str, fmt)
                     break
                 except Exception:
                     continue
@@ -4415,7 +4431,7 @@ async def get_news_for_location(location="guatemala", limit=10, context="general
                 return False
             # Convertir a UTC si es necesario
             if dt.tzinfo:
-                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+                dt = dt.astimezone(dt_module.timezone.utc).replace(tzinfo=None)
             age = (now - dt).total_seconds() / 3600.0
             return age <= max_age_hours
         except Exception:
